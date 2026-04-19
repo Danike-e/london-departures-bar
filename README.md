@@ -69,6 +69,34 @@ open -n "London Departures Bar.app"
 
 The build script compiles the Swift package in release mode, copies the executable into `London Departures Bar.app`, and applies an ad-hoc code signature.
 
+## Build A DMG
+
+To build a local DMG:
+
+```bash
+./scripts/build-dmg.sh v1.0.0
+```
+
+The DMG and checksum are written to `dist/`:
+
+```text
+dist/London-Departures-Bar-1.0.0.dmg
+dist/London-Departures-Bar-1.0.0.dmg.sha256
+```
+
+## Publish A GitHub Release
+
+GitHub Actions builds and attaches the DMG automatically when a version tag is pushed:
+
+```bash
+git tag -a v1.0.0 -m "v1.0.0"
+git push origin v1.0.0
+```
+
+The release workflow can also be run manually from GitHub Actions with an existing `v*` tag.
+
+The generated release DMG is ad-hoc signed. macOS may warn that the app is from an unidentified developer until a Developer ID signed and notarized release is available.
+
 ## Usage
 
 Launch `London Departures Bar.app`, then click the menu bar item to open the departures popover. Use favourites and recents to switch stops quickly, or open the map window to find nearby stops and stations.
@@ -79,6 +107,7 @@ Click a route, destination, or platform badge to filter the departure list. Clic
 
 - `Sources/LondonDeparturesBar/main.swift` contains the app entry point, store, API models, menu bar controller, popover UI, and map window.
 - `scripts/build-app.sh` builds and signs the local app bundle.
+- `scripts/build-dmg.sh` builds a local compressed DMG in `dist/`.
 - `Assets/AppIcon.svg` and `Assets/AppIcon.icns` provide the app icon.
 - `Assets/menu-bar-status.png`, `Assets/departures-popover.png`, `Assets/route-filter-popover.png`, and `Assets/stop-manager-map.png` provide README screenshots.
 - `Packaging/Info.plist` provides the macOS app bundle metadata.

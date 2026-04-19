@@ -1,0 +1,93 @@
+name: Build Release DMG
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, for example v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-dmg:
+    name: Build and Upload DMG
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+(\.[0-9]+){1,2}([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v1.0.0 or v1.0.0-beta.1" >&2
+            exit 1
+          fi
+
+          git fetch --tags --force
+          if ! git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag does not exist. Create and push the tag first." >&2
+            exit 1
+          fi
+
+          git checkout --detach "$tag"
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dmg=dist/London-Departures-Bar-$version.dmg" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/London-Departures-Bar-$version.dmg.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build DMG
+        run: ./scripts/build-dmg.sh "${{ steps.release.outputs.tag }}"
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          cat > release-notes.md <<'EOF'
+          Built automatically from the tagged source.
+
+          This DMG contains an ad-hoc signed development build. macOS may warn that the app is from an unidentified developer until a Developer ID signed and notarized release is available.
+          EOF
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          DMG: ${{ steps.release.outputs.dmg }}
+          CHECKSUM: ${{ steps.release.outputs.checksum }}
+        shell: bash
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$DMG" "$CHECKSUM" --clobber
+          else
+            gh release create "$TAG" "$DMG" "$CHECKSUM" \
+              --title "London Departures Bar $TAG" \
+              --notes-file release-notes.md
+          fi
