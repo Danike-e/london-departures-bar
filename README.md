@@ -2,6 +2,8 @@
 
 London Departures Bar is a lightweight macOS menu bar app for live public transport departures around London. It keeps the next service visible in the menu bar and opens into a compact departures board for nearby stops and stations.
 
+![London Departures Bar menu bar status showing route 159 due in 5 minutes](Assets/menu-bar-status.png)
+
 ## What It Does
 
 - Shows the next live departure directly in the macOS menu bar.
@@ -12,6 +14,10 @@ London Departures Bar is a lightweight macOS menu bar app for live public transp
 - Saves selected stops, favourites, recent stops, cached nearby stops, and active filters between launches.
 - Refreshes live data every 60 seconds and updates countdown labels every 15 seconds.
 
+![Departures popover with routes, vehicle IDs, and next departure times](Assets/departures-popover.png)
+
+![Departures popover filtered to route 453](Assets/route-filter-popover.png)
+
 ## Stop And Station Discovery
 
 - Finds nearby TfL stops and stations from the TfL StopPoint API.
@@ -20,6 +26,8 @@ London Departures Bar is a lightweight macOS menu bar app for live public transp
 - Can request the current macOS location permission to jump the map to nearby transport.
 - Shows route and destination summaries for the selected stop.
 - Lets you favourite stops from the popover or map window.
+
+![Stop manager map with nearby stops and selected departures](Assets/stop-manager-map.png)
 
 ## Live Data Sources
 
@@ -72,6 +80,7 @@ Click a route, destination, or platform badge to filter the departure list. Clic
 - `Sources/LondonDeparturesBar/main.swift` contains the app entry point, store, API models, menu bar controller, popover UI, and map window.
 - `scripts/build-app.sh` builds and signs the local app bundle.
 - `Assets/AppIcon.svg` and `Assets/AppIcon.icns` provide the app icon.
+- `Assets/menu-bar-status.png`, `Assets/departures-popover.png`, `Assets/route-filter-popover.png`, and `Assets/stop-manager-map.png` provide README screenshots.
 - `Packaging/Info.plist` provides the macOS app bundle metadata.
 
 ## Name

@@ -9,4 +9,3 @@ DerivedData/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
 security_best_practices_report.md
-/Assets/Screenshot*.png
