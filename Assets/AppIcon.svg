@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="London Departures Bar app icon">
+  <defs>
+    <linearGradient id="plate" x1="160" y1="120" x2="864" y2="904" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f7f9ff"/>
+      <stop offset="1" stop-color="#dbe3f3"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#plate)"/>
+  <circle cx="512" cy="512" r="292" fill="none" stroke="#dc241f" stroke-width="150"/>
+  <rect x="142" y="405" width="740" height="214" rx="58" fill="#0019a8"/>
+  <rect x="242" y="456" width="540" height="112" rx="24" fill="#ffffff"/>
+  <text x="512" y="537" text-anchor="middle" font-family="Avenir Next, Helvetica, Arial, sans-serif" font-size="92" font-weight="800" letter-spacing="5" fill="#0019a8">BUS</text>
+  <path d="M318 662h388c41 0 76 29 84 69l21 107H213l21-107c8-40 43-69 84-69z" fill="#dc241f"/>
+  <rect x="307" y="704" width="410" height="74" rx="18" fill="#ffffff"/>
+  <circle cx="348" cy="838" r="42" fill="#0019a8"/>
+  <circle cx="676" cy="838" r="42" fill="#0019a8"/>
+</svg>

@@ -1,0 +1,2202 @@
+import AppKit
+import Combine
+import CoreLocation
+import MapKit
+import SwiftUI
+
+private func displayRouteLabel(_ route: String, mode: TransitMode) -> String {
+    guard mode == .bus else {
+        return route
+    }
+
+    let trimmed = route.trimmingCharacters(in: .whitespacesAndNewlines)
+    let hasLetter = trimmed.range(of: #"[A-Za-z]"#, options: .regularExpression) != nil
+    let hasNumber = trimmed.range(of: #"[0-9]"#, options: .regularExpression) != nil
+
+    return hasLetter && hasNumber ? trimmed.uppercased() : route
+}
+
+struct Stop: Identifiable, Codable, Equatable {
+    let id: String
+    let name: String
+    let area: String
+    let code: String
+    let stopLetter: String?
+    let tflAtcoCode: String?
+    let latitude: Double
+    let longitude: Double
+    let routes: [String]
+    let destinations: [String]
+    let modes: [String]?
+    let nationalRailCRS: String?
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+
+    var displayCode: String {
+        let trimmedLetter = stopLetter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedLetter.isEmpty {
+            return trimmedLetter.uppercased()
+        }
+
+        return code.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var primaryMode: TransitMode {
+        TransitMode.primary(from: modes ?? [])
+    }
+
+    var colorRoute: String? {
+        primaryMode == .tube ? routes.first : nil
+    }
+}
+
+struct Departure: Identifiable {
+    let id = UUID()
+    let route: String
+    let destination: String
+    let vehicleID: String?
+    let mode: TransitMode
+    let platform: String?
+    let minutes: Int
+    let dueAt: Date
+
+    var filterKey: String {
+        if mode == .nationalRail {
+            return platform.map { "Platform \($0)" } ?? "No platform"
+        }
+
+        return mode == .bus ? route : destination
+    }
+
+    var filterLabel: String {
+        filterKey
+    }
+
+    var departureBadgeLabel: String {
+        mode == .nationalRail ? destination : filterLabel
+    }
+
+    var detailText: String {
+        mode == .bus ? destination : route
+    }
+
+    var showsVehiclePlate: Bool {
+        mode == .bus && vehicleID != nil
+    }
+}
+
+enum TransitMode: String, Codable {
+    case bus
+    case tram
+    case tube
+    case dlr
+    case overground
+    case elizabethLine = "elizabeth-line"
+    case nationalRail = "national-rail"
+
+    static let supportedQueryModes = [
+        bus,
+        tram,
+        tube,
+        dlr,
+        overground,
+        elizabethLine,
+        nationalRail
+    ]
+
+    static func primary(from modes: [String]) -> TransitMode {
+        let parsedModes = modes.compactMap { TransitMode(rawValue: $0.lowercased()) }
+        let priority: [TransitMode] = [.tram, .tube, .dlr, .overground, .elizabethLine, .nationalRail, .bus]
+        return priority.first { parsedModes.contains($0) } ?? .bus
+    }
+
+    var color: Color {
+        color(for: nil)
+    }
+
+    func color(for route: String?) -> Color {
+        if self == .tube, let route {
+            return Self.tubeLineRGB(for: route).color
+        }
+
+        switch self {
+        case .bus:
+            return RGB(220, 36, 31).color
+        case .tram:
+            return RGB(95, 181, 38).color
+        case .tube:
+            return RGB(0, 25, 168).color
+        case .dlr:
+            return RGB(0, 175, 173).color
+        case .overground:
+            return RGB(250, 123, 5).color
+        case .elizabethLine:
+            return RGB(96, 57, 158).color
+        case .nationalRail:
+            return Color(red: 0.0, green: 0.19, blue: 0.51)
+        }
+    }
+
+    var nsColor: NSColor {
+        nsColor(for: nil)
+    }
+
+    func nsColor(for route: String?) -> NSColor {
+        if self == .tube, let route {
+            return Self.tubeLineRGB(for: route).nsColor
+        }
+
+        switch self {
+        case .bus:
+            return RGB(220, 36, 31).nsColor
+        case .tram:
+            return RGB(95, 181, 38).nsColor
+        case .tube:
+            return RGB(0, 25, 168).nsColor
+        case .dlr:
+            return RGB(0, 175, 173).nsColor
+        case .overground:
+            return RGB(250, 123, 5).nsColor
+        case .elizabethLine:
+            return RGB(96, 57, 158).nsColor
+        case .nationalRail:
+            return NSColor(calibratedRed: 0.0, green: 0.19, blue: 0.51, alpha: 1)
+        }
+    }
+
+    private struct RGB {
+        let red: Double
+        let green: Double
+        let blue: Double
+
+        init(_ red: Double, _ green: Double, _ blue: Double) {
+            self.red = red
+            self.green = green
+            self.blue = blue
+        }
+
+        var color: Color {
+            Color(red: red / 255, green: green / 255, blue: blue / 255)
+        }
+
+        var nsColor: NSColor {
+            NSColor(calibratedRed: red / 255, green: green / 255, blue: blue / 255, alpha: 1)
+        }
+    }
+
+    private static func tubeLineRGB(for route: String) -> RGB {
+        let key = route
+            .lowercased()
+            .replacingOccurrences(of: "&", with: "and")
+            .replacingOccurrences(of: "-", with: " ")
+        if key.contains("bakerloo") {
+            return RGB(178, 99, 0)
+        }
+        if key.contains("central") {
+            return RGB(220, 36, 31)
+        }
+        if key.contains("circle") {
+            return RGB(255, 200, 10)
+        }
+        if key.contains("district") {
+            return RGB(0, 125, 50)
+        }
+        if key.contains("hammersmith") || key.contains("city") {
+            return RGB(245, 137, 166)
+        }
+        if key.contains("jubilee") {
+            return RGB(131, 141, 147)
+        }
+        if key.contains("metropolitan") {
+            return RGB(155, 0, 88)
+        }
+        if key.contains("northern") {
+            return RGB(0, 0, 0)
+        }
+        if key.contains("piccadilly") {
+            return RGB(0, 25, 168)
+        }
+        if key.contains("victoria") {
+            return RGB(3, 155, 229)
+        }
+        if key.contains("waterloo") {
+            return RGB(118, 208, 189)
+        }
+
+        return RGB(0, 25, 168)
+    }
+}
+
+private func formatCountdown(until dueAt: Date, now: Date) -> String {
+    let seconds = dueAt.timeIntervalSince(now)
+    guard seconds >= 60 else {
+        return "Due"
+    }
+
+    let minutes = max(1, Int(floor(seconds / 60.0)))
+    return "\(minutes) mins"
+}
+
+extension MKCoordinateRegion {
+    func contains(_ coordinate: CLLocationCoordinate2D) -> Bool {
+        let latitudeRange = (center.latitude - span.latitudeDelta / 2)...(center.latitude + span.latitudeDelta / 2)
+        let longitudeRange = (center.longitude - span.longitudeDelta / 2)...(center.longitude + span.longitudeDelta / 2)
+        return latitudeRange.contains(coordinate.latitude) && longitudeRange.contains(coordinate.longitude)
+    }
+
+    var searchMargin: MKCoordinateSpan {
+        MKCoordinateSpan(
+            latitudeDelta: max(span.latitudeDelta, 0.02),
+            longitudeDelta: max(span.longitudeDelta, 0.02)
+        )
+    }
+}
+
+private extension CLLocationCoordinate2D {
+    func distance(to other: CLLocationCoordinate2D) -> CLLocationDistance {
+        CLLocation(latitude: latitude, longitude: longitude)
+            .distance(from: CLLocation(latitude: other.latitude, longitude: other.longitude))
+    }
+}
+
+final class LocationProvider: NSObject, ObservableObject, CLLocationManagerDelegate, @unchecked Sendable {
+    @Published var coordinate: CLLocationCoordinate2D?
+    @Published var locationError: String?
+
+    private let manager = CLLocationManager()
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyNearestTenMeters
+    }
+
+    func requestLocation() {
+        locationError = nil
+        manager.requestWhenInUseAuthorization()
+        manager.requestLocation()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else { return }
+        let coordinate = location.coordinate
+        DispatchQueue.main.async {
+            self.coordinate = coordinate
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        let message = error.localizedDescription
+        DispatchQueue.main.async {
+            self.locationError = message
+        }
+    }
+}
+
+@MainActor
+final class AppActions: ObservableObject {
+    var open: (() -> Void)?
+    var quit: (() -> Void)?
+}
+
+@MainActor
+final class LondonDeparturesBarStore: ObservableObject {
+    private static let recentLimit = 5
+
+    @Published var selectedStopID: String
+    @Published var selectedArea: String
+    @Published var favouriteIDs: [String]
+    @Published var recentIDs: [String]
+    @Published var nearbyStops: [Stop] = []
+    @Published var nearbyLoading: Bool = false
+    @Published var nearbySearchError: String?
+    @Published var liveArrivals: [Departure] = []
+    @Published var liveArrivalsStopID: String?
+    @Published var liveRouteSections: [TfLRouteSection] = []
+    @Published var liveRouteSectionsStopID: String?
+    @Published var lastRefreshedAt: Date?
+    @Published var now: Date = .now
+    @Published var routeFiltersByStopID: [String: [String]]
+
+    private enum DefaultsKey {
+        static let selectedStop = "londonDeparturesBar.selectedStop"
+        static let selectedArea = "londonDeparturesBar.selectedArea"
+        static let favourites = "londonDeparturesBar.favourites"
+        static let recents = "londonDeparturesBar.recents"
+        static let cachedStops = "londonDeparturesBar.cachedStops"
+        static let routeFilters = "londonDeparturesBar.routeFilters"
+    }
+
+    private let defaultStops: [Stop] = [
+        Stop(
+            id: "tfl-490013767X",
+            name: "Northumberland Avenue / Trafalgar Square",
+            area: "Central London",
+            code: "X",
+            stopLetter: "X",
+            tflAtcoCode: "490013767X",
+            latitude: 51.50716,
+            longitude: -0.12673,
+            routes: ["91", "N91", "N97"],
+            destinations: [],
+            modes: [TransitMode.bus.rawValue],
+            nationalRailCRS: nil
+        ),
+        Stop(
+            id: "tfl-940GZZLUCHX",
+            name: "Charing Cross Underground Station",
+            area: "Central London",
+            code: "CHX",
+            stopLetter: nil,
+            tflAtcoCode: "940GZZLUCHX",
+            latitude: 51.50741,
+            longitude: -0.127277,
+            routes: ["Bakerloo", "Northern"],
+            destinations: [],
+            modes: [TransitMode.tube.rawValue],
+            nationalRailCRS: nil
+        ),
+        Stop(
+            id: "tfl-490014585N",
+            name: "Whitehall / Trafalgar Square",
+            area: "Central London",
+            code: "N",
+            stopLetter: "N",
+            tflAtcoCode: "490014585N",
+            latitude: 51.50631,
+            longitude: -0.12705,
+            routes: ["24", "26", "87", "88", "91"],
+            destinations: [],
+            modes: [TransitMode.bus.rawValue],
+            nationalRailCRS: nil
+        )
+    ]
+
+    private let defaults = UserDefaults.standard
+    private var refreshTimer: Timer?
+    private var clockTimer: Timer?
+    private var nearbySearchTask: Task<Void, Never>?
+    private var arrivalsSearchTask: Task<Void, Never>?
+    private var stopIndex: [String: Stop]
+    private let defaultStopIDs: Set<String>
+
+    init() {
+        let defaultStop = defaultStops[0].id
+        defaultStopIDs = Set(defaultStops.map(\.id))
+        let cachedStops = Self.loadCachedStops(from: defaults)
+        let loadedStops = Self.uniqueStops(defaultStops + cachedStops)
+        let loadedStopIndex = Dictionary(uniqueKeysWithValues: loadedStops.map { ($0.id, $0) })
+        selectedStopID = defaults.string(forKey: DefaultsKey.selectedStop) ?? defaultStop
+        selectedArea = defaults.string(forKey: DefaultsKey.selectedArea) ?? defaultStops[0].area
+        favouriteIDs = Self.uniqueIDs(defaults.stringArray(forKey: DefaultsKey.favourites) ?? [], limit: 20)
+        recentIDs = Self.uniqueIDs(defaults.stringArray(forKey: DefaultsKey.recents) ?? [], limit: Self.recentLimit)
+        routeFiltersByStopID = Self.loadRouteFilters(from: defaults)
+        stopIndex = loadedStopIndex
+        if !areas.contains(selectedArea) {
+            selectedArea = defaultStops[0].area
+        }
+        if stop(for: selectedStopID) == nil {
+            selectedStopID = defaultStop
+        }
+        recentIDs = uniquePrefix([selectedStopID] + recentIDs, limit: Self.recentLimit)
+        persist()
+        loadLiveTransitData(for: selectedStop)
+
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.refresh()
+            }
+        }
+        clockTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.now = .now
+            }
+        }
+    }
+
+    var stops: [Stop] {
+        Self.uniqueStops(Array(stopIndex.values) + nearbyStops)
+    }
+
+    var areas: [String] {
+        let values = stops.map(\.area)
+        return ["All"] + unique(values).sorted(by: { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending })
+    }
+
+    var selectedStop: Stop {
+        stop(for: selectedStopID) ?? defaultStops[0]
+    }
+
+    var selectedDepartureSummary: String {
+        guard let next = nextDepartures(for: selectedStop).first else {
+            if selectedStop.tflAtcoCode == nil {
+                return "No live TfL data"
+            }
+
+            return routeFilterIsActive(for: selectedStop.id) ? "No selected departures" : "No live TfL departures"
+        }
+
+        return "\(selectedStop.name) · \(formatCountdown(until: next.dueAt, now: now))"
+    }
+
+    var menuLabel: String {
+        guard let next = departures.first else {
+            return "Bus"
+        }
+
+        return "\(next.route) \(formatCountdown(until: next.dueAt, now: now))"
+    }
+
+    var statusTooltip: String {
+        let favourites = favouriteStops.map(\.name).joined(separator: ", ")
+        let favouriteText = favourites.isEmpty ? "No favourites yet" : "Favourites: \(favourites)"
+        return "\(selectedDepartureSummary)\n\(selectedRouteFilterSummary)\n\(favouriteText)"
+    }
+
+    var departures: [Departure] {
+        nextDepartures(for: selectedStop)
+    }
+
+    var selectedRouteFilterSummary: String {
+        let filters = selectedFilters(for: selectedStopID).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        return filters.isEmpty ? "Filter: All" : "Filter: \(filters.joined(separator: ", "))"
+    }
+
+    var visibleStops: [Stop] {
+        guard selectedArea != "All" else {
+            return stops
+        }
+
+        let filtered = stops.filter { $0.area == selectedArea }
+        return filtered.isEmpty ? stops : filtered
+    }
+
+    var favouriteStops: [Stop] {
+        favouriteIDs.compactMap { stop(for: $0) }
+    }
+
+    var recentStops: [Stop] {
+        recentIDs.compactMap { stop(for: $0) }
+    }
+
+    func selectStop(_ id: String) {
+        guard let stop = stop(for: id) else { return }
+        selectedStopID = stop.id
+        selectedArea = stop.area
+        recentIDs = uniquePrefix([id] + recentIDs.filter { $0 != id }, limit: Self.recentLimit)
+        persist()
+        loadLiveTransitData(for: stop)
+    }
+
+    func selectArea(_ area: String) {
+        selectedArea = area
+        if area != "All", let first = stops.first(where: { $0.area == area }) {
+            selectedStopID = first.id
+            recentIDs = uniquePrefix([first.id] + recentIDs.filter { $0 != first.id }, limit: Self.recentLimit)
+        }
+
+        persist()
+    }
+
+    func toggleFavourite(_ id: String) {
+        if favouriteIDs.contains(id) {
+            favouriteIDs.removeAll { $0 == id }
+        } else {
+            favouriteIDs = uniquePrefix([id] + favouriteIDs, limit: 20)
+        }
+
+        persist()
+    }
+
+    func filterOptions(for stop: Stop) -> [String] {
+        let values = liveArrivalsStopID == stop.id && !liveArrivals.isEmpty
+            ? liveArrivals.map(\.filterLabel)
+            : stop.primaryMode == .bus
+            ? (stop.id == liveRouteSectionsStopID && !liveRouteSections.isEmpty ? liveRouteSections.map(\.lineId) : stop.routes)
+            : stop.destinations
+
+        return unique(values)
+            .filter { !$0.isEmpty }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    func mode(for filter: String, at stop: Stop) -> TransitMode {
+        if liveArrivalsStopID == stop.id,
+           let departure = liveArrivals.first(where: { $0.filterKey == filter }) {
+            return departure.mode
+        }
+
+        return stop.primaryMode
+    }
+
+    func colorRoute(for filter: String, at stop: Stop) -> String? {
+        if liveArrivalsStopID == stop.id,
+           let departure = liveArrivals.first(where: { $0.filterKey == filter }) {
+            return departure.route
+        }
+
+        guard stop.primaryMode == .tube, stop.routes.count == 1 else {
+            return nil
+        }
+
+        return stop.routes.first
+    }
+
+    func colorRoute(for departure: Departure) -> String? {
+        departure.mode == .tube ? departure.route : nil
+    }
+
+    func colorRoute(for departure: Departure, at stop: Stop) -> String? {
+        if let route = colorRoute(for: departure) {
+            return route
+        }
+
+        return colorRoute(for: departure.filterKey, at: stop)
+    }
+
+    func selectedFilters(for stopID: String) -> Set<String> {
+        guard let filters = routeFiltersByStopID[stopID] else {
+            return []
+        }
+
+        guard let stop = stop(for: stopID) else {
+            return Set(filters)
+        }
+
+        let availableFilters = Set(filterOptions(for: stop))
+        guard !availableFilters.isEmpty else {
+            return Set(filters)
+        }
+
+        return Set(filters).intersection(availableFilters)
+    }
+
+    func routeFilterIsActive(for stopID: String) -> Bool {
+        !selectedFilters(for: stopID).isEmpty
+    }
+
+    func toggleFilter(_ filter: String, for stopID: String) {
+        var filters = selectedFilters(for: stopID)
+        if filters.contains(filter) {
+            filters.remove(filter)
+        } else {
+            filters.insert(filter)
+        }
+
+        setRouteFilter(filters, for: stopID)
+    }
+
+    func showAllRoutes(for stopID: String) {
+        var filters = routeFiltersByStopID
+        filters.removeValue(forKey: stopID)
+        routeFiltersByStopID = filters
+        persist()
+    }
+
+    func stops(in region: MKCoordinateRegion) -> [Stop] {
+        stops.filter { region.contains($0.coordinate) }
+    }
+
+    func loadNearbyStops(around coordinate: CLLocationCoordinate2D) {
+        nearbySearchTask?.cancel()
+        nearbyLoading = true
+        nearbySearchError = nil
+        nearbySearchTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                Task { @MainActor in
+                    self.nearbyLoading = false
+                }
+            }
+            let loaded = await Self.fetchNearbyStops(around: coordinate)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self.nearbyStops = Array(loaded.prefix(10))
+                self.nearbySearchError = loaded.isEmpty ? "No nearby TfL stops found." : nil
+                for stop in loaded {
+                    self.stopIndex[stop.id] = stop
+                }
+                self.persist()
+                if let first = loaded.first {
+                    self.selectStop(first.id)
+                }
+            }
+        }
+    }
+
+    func loadLiveTransitData(for stop: Stop) {
+        arrivalsSearchTask?.cancel()
+        guard let stopCode = stop.tflAtcoCode, !stopCode.isEmpty else {
+            liveArrivals = []
+            liveArrivalsStopID = nil
+            liveRouteSections = []
+            liveRouteSectionsStopID = nil
+            lastRefreshedAt = nil
+            return
+        }
+
+        arrivalsSearchTask = Task { [weak self] in
+            guard let self else { return }
+            async let arrivalsTask = Self.fetchLiveArrivals(for: stop)
+            async let routeSectionsTask = Self.fetchLiveRouteSections(for: stopCode)
+            let arrivals = await arrivalsTask
+            let routeSections = await routeSectionsTask
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self.liveArrivals = arrivals
+                self.liveArrivalsStopID = stop.id
+                self.liveRouteSections = routeSections
+                self.liveRouteSectionsStopID = stop.id
+                self.lastRefreshedAt = .now
+            }
+        }
+    }
+
+    func nextDepartures(for stop: Stop) -> [Departure] {
+        if liveArrivalsStopID == stop.id, !liveArrivals.isEmpty {
+            let selectedFilters = selectedFilters(for: stop.id)
+            guard !selectedFilters.isEmpty else {
+                return liveArrivals
+            }
+
+            return liveArrivals.filter { selectedFilters.contains($0.filterKey) }
+        }
+
+        return []
+    }
+
+    func refresh() {
+        now = .now
+        loadLiveTransitData(for: selectedStop)
+    }
+
+    func subtitle(for stop: Stop) -> String {
+        let parts = [stop.area, stop.displayCode]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { value in
+                let lower = value.lowercased()
+                return lower != "nearby stops" && lower != "map"
+            }
+
+        return parts.joined(separator: " · ")
+    }
+
+    func routeSummary(for stop: Stop) -> String {
+        let routes = stop.id == liveRouteSectionsStopID && !liveRouteSections.isEmpty
+            ? liveRouteSections.map(\.lineId)
+            : stop.routes
+
+        let values = unique(routes).filter { !$0.isEmpty }
+        return values.isEmpty ? "No routes" : values.prefix(8).joined(separator: ", ")
+    }
+
+    func destinationSummary(for stop: Stop) -> String {
+        let destinations = stop.id == liveArrivalsStopID && !liveArrivals.isEmpty
+            ? liveArrivals.map(\.destination)
+            : stop.id == liveRouteSectionsStopID && !liveRouteSections.isEmpty
+            ? liveRouteSections.map { $0.vehicleDestinationText ?? $0.destinationName ?? "" }
+            : stop.destinations
+
+        let values = unique(destinations).filter { !$0.isEmpty }
+        return values.isEmpty ? "No destinations" : values.prefix(6).joined(separator: ", ")
+    }
+
+    private func persist() {
+        defaults.set(selectedStopID, forKey: DefaultsKey.selectedStop)
+        defaults.set(selectedArea, forKey: DefaultsKey.selectedArea)
+        defaults.set(favouriteIDs, forKey: DefaultsKey.favourites)
+        defaults.set(recentIDs, forKey: DefaultsKey.recents)
+        defaults.set(routeFiltersByStopID, forKey: DefaultsKey.routeFilters)
+        persistCachedStops()
+    }
+
+    private func setRouteFilter(_ routes: Set<String>, for stopID: String) {
+        let sortedRoutes = routes.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        var filters = routeFiltersByStopID
+        if sortedRoutes.isEmpty {
+            filters.removeValue(forKey: stopID)
+        } else {
+            filters[stopID] = sortedRoutes
+        }
+
+        routeFiltersByStopID = filters
+        persist()
+    }
+
+    private func persistCachedStops() {
+        let pinnedIDs = Set([selectedStopID] + favouriteIDs + recentIDs)
+        let cachedStops = Self.uniqueStops(Array(stopIndex.values) + nearbyStops)
+            .filter { stop in
+                !defaultStopIDs.contains(stop.id) || pinnedIDs.contains(stop.id)
+            }
+            .sorted { lhs, rhs in
+                let lhsPinned = pinnedIDs.contains(lhs.id)
+                let rhsPinned = pinnedIDs.contains(rhs.id)
+                if lhsPinned != rhsPinned {
+                    return lhsPinned
+                }
+
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+            .prefix(100)
+
+        do {
+            let data = try JSONEncoder().encode(Array(cachedStops))
+            defaults.set(data, forKey: DefaultsKey.cachedStops)
+        } catch {
+            defaults.removeObject(forKey: DefaultsKey.cachedStops)
+        }
+    }
+
+    private func uniquePrefix(_ values: [String], limit: Int) -> [String] {
+        var seen = Set<String>()
+        return Array(values.filter { seen.insert($0).inserted }.prefix(limit))
+    }
+
+    func cameraRegion(for area: String) -> MKCoordinateRegion {
+        let candidates = area == "All" ? stops : stops.filter { $0.area == area }
+        return region(for: candidates.isEmpty ? stops : candidates)
+    }
+
+    func defaultCoordinate(for area: String) -> CLLocationCoordinate2D {
+        let region = cameraRegion(for: area)
+        return region.center
+    }
+
+    private func region(for stops: [Stop]) -> MKCoordinateRegion {
+        let latitudeValues = stops.map(\.latitude)
+        let longitudeValues = stops.map(\.longitude)
+        let latitude = latitudeValues.reduce(0, +) / Double(max(stops.count, 1))
+        let longitude = longitudeValues.reduce(0, +) / Double(max(stops.count, 1))
+        let latitudeDelta = max(0.03, 0.012 * Double(max(stops.count, 1)))
+        let longitudeDelta = max(0.03, 0.015 * Double(max(stops.count, 1)))
+        return MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+            span: MKCoordinateSpan(latitudeDelta: latitudeDelta, longitudeDelta: longitudeDelta)
+        )
+    }
+
+    private func unique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { seen.insert($0).inserted }
+    }
+
+    private static func uniqueStops(_ stops: [Stop]) -> [Stop] {
+        var seen = Set<String>()
+        return stops.filter { seen.insert($0.id).inserted }
+    }
+
+    private func stop(for id: String) -> Stop? {
+        stopIndex[id] ?? nearbyStops.first(where: { $0.id == id })
+    }
+
+    private static func fetchLiveArrivals(for stop: Stop) async -> [Departure] {
+        let stopCode = stop.tflAtcoCode ?? ""
+        guard let url = URL(string: "https://api.tfl.gov.uk/StopPoint/\(stopCode)/Arrivals") else {
+            return []
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("LondonDeparturesBar/1.0", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                return []
+            }
+
+            let decoded = try JSONDecoder().decode([TfLArrivalRecord].self, from: data)
+            let sorted = decoded.sorted { lhs, rhs in lhs.timeToStation < rhs.timeToStation }
+
+            let departures = sorted.prefix(8).map { record in
+                let dueAt = record.expectedArrivalDate ?? Date().addingTimeInterval(TimeInterval(record.timeToStation))
+                let minutes = record.timeToStation <= 0 ? 0 : max(1, record.timeToStation / 60)
+                return Departure(
+                    route: record.lineName,
+                    destination: record.destinationName,
+                    vehicleID: Self.firstNonEmpty(record.vehicleId),
+                    mode: Self.mode(from: record.modeName),
+                    platform: nil,
+                    minutes: minutes,
+                    dueAt: dueAt
+                )
+            }
+
+            if departures.isEmpty, stop.primaryMode == .nationalRail {
+                return await fetchNationalRailDepartures(for: stop)
+            }
+
+            return departures
+        } catch {
+            if stop.primaryMode == .nationalRail {
+                return await fetchNationalRailDepartures(for: stop)
+            }
+            return []
+        }
+    }
+
+    private static func fetchLiveRouteSections(for stopCode: String) async -> [TfLRouteSection] {
+        guard let url = URL(string: "https://api.tfl.gov.uk/StopPoint/\(stopCode)/Route") else {
+            return []
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("LondonDeparturesBar/1.0", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                return []
+            }
+
+            let decoded = try JSONDecoder().decode([TfLRouteSection].self, from: data)
+            return decoded
+                .filter { $0.isActive ?? true }
+                .sorted { lhs, rhs in
+                    lhs.lineId.localizedCaseInsensitiveCompare(rhs.lineId) == .orderedAscending
+                }
+        } catch {
+            return []
+        }
+    }
+
+    private static func fetchNationalRailDepartures(for stop: Stop) async -> [Departure] {
+        guard let crs = await nationalRailCRS(for: stop) else {
+            return []
+        }
+
+        guard let url = URL(string: "https://huxley2.azurewebsites.net/departures/\(crs)/10") else {
+            return []
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("LondonDeparturesBar/1.0", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                return []
+            }
+
+            let decoded = try JSONDecoder().decode(NationalRailDeparturesResponse.self, from: data)
+            let services = (decoded.trainServices ?? []) + (decoded.busServices ?? [])
+            return services.compactMap { service in
+                guard service.isCancelled != true else { return nil }
+                guard let dueAt = service.departureDate else { return nil }
+                let destination = service.destinationSummary
+                guard !destination.isEmpty else { return nil }
+
+                let platform = Self.firstNonEmpty(service.platform).map { "Platform \($0)" }
+                let timing = Self.firstNonEmpty(service.etd, service.std)
+                let detail = [platform, service.operatorName, timing]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " · ")
+                let minutes = max(0, Int(dueAt.timeIntervalSinceNow / 60))
+
+                return Departure(
+                    route: detail.isEmpty ? "National Rail" : detail,
+                    destination: destination,
+                    vehicleID: nil,
+                    mode: .nationalRail,
+                    platform: Self.firstNonEmpty(service.platform),
+                    minutes: minutes,
+                    dueAt: dueAt
+                )
+            }
+            .sorted { $0.dueAt < $1.dueAt }
+            .prefix(8)
+            .map { $0 }
+        } catch {
+            return []
+        }
+    }
+
+    private static func nationalRailCRS(for stop: Stop) async -> String? {
+        if let crs = firstNonEmpty(stop.nationalRailCRS) {
+            return crs.uppercased()
+        }
+
+        let stationName = stop.name
+            .replacingOccurrences(of: " Rail Station", with: "", options: [.caseInsensitive])
+            .replacingOccurrences(of: " Station", with: "", options: [.caseInsensitive])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !stationName.isEmpty else { return nil }
+        guard let encodedName = stationName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "https://huxley2.azurewebsites.net/crs/\(encodedName)") else {
+            return nil
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("LondonDeparturesBar/1.0", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                return nil
+            }
+
+            let matches = try JSONDecoder().decode([NationalRailStationMatch].self, from: data)
+            return matches.first?.crsCode.uppercased()
+        } catch {
+            return nil
+        }
+    }
+
+    private static func fetchNearbyStops(around coordinate: CLLocationCoordinate2D) async -> [Stop] {
+        var components = URLComponents(string: "https://api.tfl.gov.uk/StopPoint")!
+        components.queryItems = [
+            URLQueryItem(name: "lat", value: String(coordinate.latitude)),
+            URLQueryItem(name: "lon", value: String(coordinate.longitude)),
+            URLQueryItem(name: "stopTypes", value: "NaptanPublicBusCoachTram,NaptanMetroStation,NaptanRailStation"),
+            URLQueryItem(name: "radius", value: "300"),
+            URLQueryItem(name: "modes", value: TransitMode.supportedQueryModes.map(\.rawValue).joined(separator: ","))
+        ]
+
+        guard let url = components.url else {
+            return []
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("LondonDeparturesBar/1.0", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                return []
+            }
+
+            let decoded = try JSONDecoder().decode(TfLNearbyStopsResponse.self, from: data)
+            let stops = decoded.stopPoints.compactMap { record -> Stop? in
+                guard let latitude = record.lat, let longitude = record.lon else {
+                    return nil
+                }
+
+                let atcoCode = record.naptanId ?? record.id
+                guard let atcoCode, !atcoCode.isEmpty else {
+                    return nil
+                }
+
+                let stopLetter = Self.stopLetter(from: record)
+                let name = Self.firstNonEmpty(record.commonName, record.indicator)
+                guard let name else { return nil }
+
+                let code = Self.firstNonEmpty(stopLetter, record.indicator, atcoCode) ?? atcoCode
+                let routeDetails = record.lines?.compactMap { line -> RouteDetail? in
+                    let route = Self.firstNonEmpty(line.name, line.id) ?? ""
+                    guard !route.isEmpty else { return nil }
+                    return RouteDetail(route: route, destination: "")
+                } ?? []
+                let modes = Self.stopModes(from: record)
+
+                let uniqueRoutes = Self.uniqueRouteDetails(routeDetails)
+                return Stop(
+                    id: "tfl-\(atcoCode)",
+                    name: name,
+                    area: "",
+                    code: code,
+                    stopLetter: stopLetter,
+                    tflAtcoCode: atcoCode,
+                    latitude: latitude,
+                    longitude: longitude,
+                    routes: uniqueRoutes.map(\.route),
+                    destinations: uniqueRoutes.map(\.destination),
+                    modes: modes,
+                    nationalRailCRS: nil
+                )
+            }
+
+            return Self.closestStops(stops, to: coordinate, limit: 10)
+        } catch {
+            return []
+        }
+    }
+
+    private static func loadCachedStops(from defaults: UserDefaults) -> [Stop] {
+        guard let data = defaults.data(forKey: DefaultsKey.cachedStops) else {
+            return []
+        }
+
+        do {
+            return try JSONDecoder().decode([Stop].self, from: data)
+        } catch {
+            defaults.removeObject(forKey: DefaultsKey.cachedStops)
+            return []
+        }
+    }
+
+    private static func loadRouteFilters(from defaults: UserDefaults) -> [String: [String]] {
+        guard let values = defaults.dictionary(forKey: DefaultsKey.routeFilters) as? [String: [String]] else {
+            return [:]
+        }
+
+        return values.mapValues { uniqueIDs($0, limit: 30) }.filter { !$0.value.isEmpty }
+    }
+
+    private static func uniqueIDs(_ values: [String], limit: Int) -> [String] {
+        var seen = Set<String>()
+        return Array(values
+            .filter { seen.insert($0).inserted }
+            .prefix(limit)
+        )
+    }
+
+    private static func closestStops(_ stops: [Stop], to coordinate: CLLocationCoordinate2D, limit: Int) -> [Stop] {
+        stops
+            .sorted { lhs, rhs in
+                lhs.coordinate.distance(to: coordinate) < rhs.coordinate.distance(to: coordinate)
+            }
+            .prefix(limit)
+            .map { $0 }
+    }
+
+    private static func uniqueRouteDetails(_ values: [RouteDetail]) -> [RouteDetail] {
+        var seen = Set<String>()
+        return values.filter { seen.insert("\($0.route)|\($0.destination)").inserted }
+    }
+
+    private static func stopLetter(from record: TfLStopPointRecord) -> String? {
+        if let stopLetter = record.stopLetter?.trimmingCharacters(in: .whitespacesAndNewlines), !stopLetter.isEmpty {
+            return stopLetter.uppercased()
+        }
+
+        if let indicator = record.indicator?.trimmingCharacters(in: .whitespacesAndNewlines), !indicator.isEmpty {
+            let pieces = indicator.split(whereSeparator: { $0.isWhitespace })
+            if let last = pieces.last, last.count == 1 {
+                return last.uppercased()
+            }
+
+            return indicator.uppercased()
+        }
+
+        return nil
+    }
+
+    private static func firstNonEmpty(_ values: String?...) -> String? {
+        values
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+
+    private static func stopModes(from record: TfLStopPointRecord) -> [String] {
+        let rawModes = (record.modes ?? []) + (record.lines?.compactMap(\.modeName) ?? [])
+        let modes = uniqueModeNames(rawModes)
+        return modes.isEmpty ? [TransitMode.bus.rawValue] : modes
+    }
+
+    private static func mode(from rawValue: String?) -> TransitMode {
+        guard let rawValue else { return .bus }
+        return TransitMode(rawValue: rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) ?? .bus
+    }
+
+    private static func uniqueModeNames(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values
+            .compactMap { value -> String? in
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard TransitMode(rawValue: trimmed) != nil else {
+                    return nil
+                }
+
+                return trimmed
+            }
+            .filter { seen.insert($0).inserted }
+    }
+
+    private struct RouteDetail {
+        let route: String
+        let destination: String
+    }
+
+}
+
+private struct TfLArrivalRecord: Decodable {
+    let lineName: String
+    let destinationName: String
+    let vehicleId: String?
+    let modeName: String?
+    let expectedArrival: String?
+    let timeToStation: Int
+
+    var expectedArrivalDate: Date? {
+        guard let expectedArrival else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: expectedArrival) {
+            return date
+        }
+
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: expectedArrival)
+    }
+}
+
+private struct NationalRailDeparturesResponse: Decodable {
+    let trainServices: [NationalRailService]?
+    let busServices: [NationalRailService]?
+}
+
+private struct NationalRailService: Decodable {
+    let destination: [NationalRailLocation]?
+    let std: String?
+    let etd: String?
+    let platform: String?
+    let operatorName: String?
+    let isCancelled: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case destination
+        case std
+        case etd
+        case platform
+        case operatorName = "operator"
+        case isCancelled
+    }
+
+    var destinationSummary: String {
+        (destination ?? [])
+            .map(\.locationName)
+            .filter { !$0.isEmpty }
+            .joined(separator: " / ")
+    }
+
+    var departureDate: Date? {
+        let value = etd == "On time" || etd == "No report" || etd == "Delayed" ? std : etd
+        guard let value, !value.isEmpty, value != "Cancelled" else { return nil }
+        guard let departureTime = Self.timeFormatter.date(from: value) else { return nil }
+
+        let calendar = Calendar.current
+        let timeComponents = calendar.dateComponents([.hour, .minute], from: departureTime)
+        guard let hour = timeComponents.hour, let minute = timeComponents.minute else { return nil }
+
+        var dateComponents = calendar.dateComponents([.year, .month, .day], from: .now)
+        dateComponents.hour = hour
+        dateComponents.minute = minute
+        let candidate = calendar.date(from: dateComponents)
+        guard let candidate else { return nil }
+
+        if candidate.timeIntervalSinceNow < -600 {
+            return calendar.date(byAdding: .day, value: 1, to: candidate)
+        }
+
+        return candidate
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+}
+
+private struct NationalRailLocation: Decodable {
+    let locationName: String
+}
+
+private struct NationalRailStationMatch: Decodable {
+    let stationName: String
+    let crsCode: String
+}
+
+struct TfLRouteSection: Decodable {
+    let lineId: String
+    let vehicleDestinationText: String?
+    let destinationName: String?
+    let isActive: Bool?
+}
+
+private struct TfLNearbyStopsResponse: Decodable {
+    let stopPoints: [TfLStopPointRecord]
+}
+
+private struct TfLStopPointRecord: Decodable {
+    let id: String?
+    let naptanId: String?
+    let indicator: String?
+    let stopLetter: String?
+    let commonName: String?
+    let lat: Double?
+    let lon: Double?
+    let distance: Double?
+    let modes: [String]?
+    let lines: [TfLLineRecord]?
+}
+
+private struct TfLLineRecord: Decodable {
+    let id: String
+    let name: String?
+    let modeName: String?
+}
+
+@main
+enum LondonDeparturesBarMain {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.setActivationPolicy(.accessory)
+        application.delegate = delegate
+        withExtendedLifetime(delegate) {
+            application.run()
+        }
+    }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+    let store = LondonDeparturesBarStore()
+    let actions = AppActions()
+    private var statusItem: NSStatusItem?
+    private var popover: NSPopover?
+    private var standaloneWindow: NSWindow?
+    private var cancellable: AnyCancellable?
+    private let logURL = URL(fileURLWithPath: "/tmp/londonDeparturesBar.log")
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        log("launch")
+        NSApplication.shared.setActivationPolicy(.accessory)
+        actions.open = { [weak self] in self?.showStandaloneWindow() }
+        actions.quit = { [weak self] in self?.quitApp() }
+
+        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.isVisible = true
+        if let button = statusItem.button {
+            button.target = self
+            button.action = #selector(togglePopover(_:))
+            button.imagePosition = .imageOnly
+            button.image = statusImage()
+            button.title = ""
+        }
+
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.delegate = self
+        popover.contentSize = NSSize(width: 400, height: 440)
+        popover.contentViewController = NSHostingController(
+            rootView: LondonDeparturesBarMenuView()
+                .environmentObject(store)
+                .environmentObject(actions)
+        )
+
+        self.statusItem = statusItem
+        self.popover = popover
+
+        cancellable = store.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateStatusItem()
+            }
+
+        updateStatusItem()
+        log("status item configured")
+    }
+
+    @objc private func togglePopover(_ sender: Any?) {
+        guard let popover else { return }
+
+        if popover.isShown {
+            popover.performClose(sender)
+            clearStatusButtonHighlight()
+            return
+        }
+
+        showPopover()
+    }
+
+    private func showPopover() {
+        guard let button = statusItem?.button, let popover else { return }
+        if popover.isShown {
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        updateStatusItem()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        clearStatusButtonHighlight()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        clearStatusButtonHighlight()
+    }
+
+    private func showStandaloneWindow() {
+        if popover?.isShown == true {
+            popover?.performClose(nil)
+        }
+
+        if standaloneWindow == nil {
+            let rootView = LondonDeparturesBarBoardView()
+                .environmentObject(store)
+                .environmentObject(actions)
+
+            let controller = NSHostingController(rootView: rootView)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 720, height: 920),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "London Departures Bar"
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+            window.isReleasedWhenClosed = false
+            window.contentViewController = controller
+            standaloneWindow = window
+        }
+
+        positionStandaloneWindow()
+        standaloneWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func positionStandaloneWindow() {
+        guard let window = standaloneWindow,
+              let screen = window.screen ?? NSScreen.main else {
+            return
+        }
+
+        let visibleFrame = screen.visibleFrame
+        let targetWidth = min(720, max(520, visibleFrame.width - 80))
+        let targetHeight = min(820, max(560, visibleFrame.height - 80))
+        window.setContentSize(NSSize(width: targetWidth, height: targetHeight))
+        let frame = window.frame
+        let originX = visibleFrame.midX - frame.width / 2
+        let originY = max(visibleFrame.minY + 24, visibleFrame.maxY - frame.height - 36)
+        window.setFrameOrigin(NSPoint(x: originX, y: originY))
+    }
+
+    private func quitApp() {
+        NSApp.terminate(nil)
+    }
+
+    private func updateStatusItem() {
+        guard let button = statusItem?.button else { return }
+        let image = statusImage()
+        button.image = image
+        button.imagePosition = .imageOnly
+        button.attributedTitle = NSAttributedString(string: "")
+        button.title = ""
+        clearStatusButtonHighlight()
+        statusItem?.length = image?.size.width ?? NSStatusItem.variableLength
+        button.toolTip = store.statusTooltip
+    }
+
+    private func clearStatusButtonHighlight() {
+        statusItem?.button?.highlight(false)
+    }
+
+    private func statusText() -> String {
+        guard let next = store.departures.first else {
+            return "London Departures Bar"
+        }
+
+        let label = next.mode == .bus
+            ? next.route.trimmingCharacters(in: .whitespacesAndNewlines)
+            : next.destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shortLabel = label.count > 14 ? "\(label.prefix(12))..." : label
+        return " \(shortLabel) \(formatCountdown(until: next.dueAt, now: store.now)) "
+    }
+
+    private func statusImage() -> NSImage? {
+        let next = store.departures.first
+        let label = statusServiceLabel()
+        let countdown = statusCountdownText()
+        let font = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+        let textColor = statusForegroundColor(for: next?.mode ?? .bus, route: next?.route)
+        let backgroundColor = next?.mode.nsColor(for: next?.route) ?? NSColor.controlAccentColor
+        let badgeAttributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: textColor
+        ]
+        let countdownAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.menuBarFont(ofSize: 0),
+            .foregroundColor: NSColor.labelColor
+        ]
+        let badgeTextSize = label.size(withAttributes: badgeAttributes)
+        let countdownSize = countdown.size(withAttributes: countdownAttributes)
+        let badgeHorizontalPadding: CGFloat = 6
+        let badgeVerticalPadding: CGFloat = 2
+        let interItemSpacing: CGFloat = 5
+        let badgeSize = NSSize(
+            width: ceil(badgeTextSize.width + badgeHorizontalPadding * 2),
+            height: ceil(badgeTextSize.height + badgeVerticalPadding * 2)
+        )
+        let imageSize = NSSize(
+            width: ceil(badgeSize.width + interItemSpacing + countdownSize.width + 2),
+            height: ceil(max(badgeSize.height, countdownSize.height))
+        )
+        let image = NSImage(size: imageSize)
+        image.lockFocus()
+        backgroundColor.setFill()
+        NSBezierPath(
+            roundedRect: NSRect(
+                x: 0,
+                y: (imageSize.height - badgeSize.height) / 2,
+                width: badgeSize.width,
+                height: badgeSize.height
+            ),
+            xRadius: 4,
+            yRadius: 4
+        ).fill()
+        label.draw(
+            at: NSPoint(
+                x: badgeHorizontalPadding,
+                y: (imageSize.height - badgeTextSize.height) / 2
+            ),
+            withAttributes: badgeAttributes
+        )
+        countdown.draw(
+            at: NSPoint(
+                x: badgeSize.width + interItemSpacing,
+                y: (imageSize.height - countdownSize.height) / 2
+            ),
+            withAttributes: countdownAttributes
+        )
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
+    }
+
+    private func statusServiceLabel() -> String {
+        guard let next = store.departures.first else {
+            return "London Departures Bar"
+        }
+
+        let label = next.mode == .bus
+            ? next.route.trimmingCharacters(in: .whitespacesAndNewlines)
+            : next.destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        return label.count > 14 ? "\(label.prefix(12))..." : label
+    }
+
+    private func statusCountdownText() -> String {
+        guard let next = store.departures.first else {
+            return ""
+        }
+
+        return formatCountdown(until: next.dueAt, now: store.now)
+    }
+
+    private func statusForegroundColor(for mode: TransitMode, route: String?) -> NSColor {
+        guard mode == .tube else {
+            return .white
+        }
+
+        let route = route?.lowercased() ?? ""
+        if route.contains("circle") || route.contains("hammersmith") || route.contains("waterloo") {
+            return .black
+        }
+
+        return .white
+    }
+
+    private func log(_ message: String) {
+        let line = "[\(Date())] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logURL.path) {
+                if let handle = try? FileHandle(forWritingTo: logURL) {
+                    _ = try? handle.seekToEnd()
+                    try? handle.write(contentsOf: data)
+                    try? handle.close()
+                }
+            } else {
+                FileManager.default.createFile(atPath: logURL.path, contents: data)
+            }
+        }
+    }
+}
+
+struct LondonDeparturesBarMenuView: View {
+    @EnvironmentObject private var store: LondonDeparturesBarStore
+    @EnvironmentObject private var actions: AppActions
+    private let contentWidth: CGFloat = 352
+    private static let topScrollID = "menu-top"
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    header
+                        .id(Self.topScrollID)
+                    actionRow
+                    Divider()
+
+                    section(title: filterSectionTitle(for: store.selectedStop)) {
+                        RouteFilterPicker(stop: store.selectedStop)
+                    }
+
+                    section(title: "Next departures") {
+                        VStack(spacing: 8) {
+                            if store.departures.isEmpty {
+                                Text(departuresEmptyText(for: store.selectedStop))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+
+                            ForEach(store.departures) { departure in
+                                HStack(alignment: .firstTextBaseline) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(alignment: .center, spacing: 6) {
+                                            Button {
+                                                store.toggleFilter(departure.filterKey, for: store.selectedStop.id)
+                                            } label: {
+                                                RouteBadge(
+                                                    route: departure.departureBadgeLabel,
+                                                    mode: departure.mode,
+                                                    selected: store.selectedFilters(for: store.selectedStop.id).contains(departure.filterKey),
+                                                colorRoute: store.colorRoute(for: departure, at: store.selectedStop)
+                                                )
+                                            }
+                                            .buttonStyle(.plain)
+
+                                            if departure.showsVehiclePlate, let vehicleID = departure.vehicleID {
+                                                VehiclePlateView(vehicleID: vehicleID)
+                                            }
+                                        }
+
+                                        Text(departure.detailText)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer(minLength: 12)
+
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text(formatCountdown(until: departure.dueAt, now: store.now))
+                                            .font(.headline)
+                                        Text(formatClock(departure.dueAt))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(.vertical, 5)
+                                .padding(.horizontal, 2)
+                            }
+                        }
+                    }
+
+                    section(title: "Favourites") {
+                        stopList(store.favouriteStops, emptyText: "Add a stop to pin it here.", scrollProxy: proxy)
+                    }
+
+                    section(title: "Recent") {
+                        stopList(store.recentStops, emptyText: "Picked stops show up here.", scrollProxy: proxy)
+                    }
+                }
+                .frame(width: contentWidth, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+            }
+            .frame(width: 400, height: 440)
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(store.selectedStop.name)
+                        .font(.headline)
+                    StopMetaView(stop: store.selectedStop)
+                }
+
+                Spacer(minLength: 12)
+
+                LastRefreshView(date: store.lastRefreshedAt)
+            }
+
+            HStack(spacing: 8) {
+                Button(store.favouriteIDs.contains(store.selectedStop.id) ? "Remove from favourites" : "Add to favourites") {
+                    store.toggleFavourite(store.selectedStop.id)
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("Refresh") {
+                    store.refresh()
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private var actionRow: some View {
+        HStack(spacing: 8) {
+            Button("Open") {
+                actions.open?()
+            }
+            .buttonStyle(.bordered)
+
+            Button("Quit") {
+                actions.quit?()
+            }
+            .buttonStyle(.bordered)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func section<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption)
+                .textCase(.uppercase)
+                .foregroundStyle(.secondary)
+            content()
+        }
+    }
+
+    private func stopList(_ stops: [Stop], emptyText: String, scrollProxy: ScrollViewProxy) -> some View {
+        VStack(spacing: 8) {
+            if stops.isEmpty {
+                Text(emptyText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ForEach(stops) { stop in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Button {
+                            store.selectStop(stop.id)
+                            scrollToTop(using: scrollProxy)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(stop.name)
+                                    .foregroundStyle(.primary)
+                                StopMetaView(stop: stop)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            store.toggleFavourite(stop.id)
+                        } label: {
+                            Image(systemName: store.favouriteIDs.contains(stop.id) ? "star.fill" : "star")
+                                .foregroundStyle(store.favouriteIDs.contains(stop.id) ? .yellow : .secondary)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+
+    private func scrollToTop(using proxy: ScrollViewProxy) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            proxy.scrollTo(Self.topScrollID, anchor: .top)
+        }
+    }
+
+    private func formatClock(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
+    }
+
+    private func departuresEmptyText(for stop: Stop) -> String {
+        store.routeFilterIsActive(for: stop.id) ? "No departures for selected filters" : "No live TfL departures"
+    }
+
+    private func filterSectionTitle(for stop: Stop) -> String {
+        switch stop.primaryMode {
+        case .bus:
+            return "Routes"
+        case .nationalRail:
+            return "Platforms"
+        default:
+            return "Destinations"
+        }
+    }
+
+}
+
+struct LastRefreshView: View {
+    let date: Date?
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            Text("Last refreshed")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Text(date.map(formatClock) ?? "Waiting")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+        }
+        .multilineTextAlignment(.trailing)
+    }
+
+    private func formatClock(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
+    }
+}
+
+struct RouteFilterPicker: View {
+    @EnvironmentObject private var store: LondonDeparturesBarStore
+    let stop: Stop
+
+    private let columns = [
+        GridItem(.adaptive(minimum: 48), spacing: 6)
+    ]
+
+    var body: some View {
+        let options = store.filterOptions(for: stop)
+        let selectedFilters = store.selectedFilters(for: stop.id)
+
+        if options.isEmpty {
+            Text(filterEmptyText(for: stop))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+                Button {
+                    store.showAllRoutes(for: stop.id)
+                } label: {
+                    RouteFilterChip(title: "All", selected: selectedFilters.isEmpty, mode: stop.primaryMode, colorRoute: stop.colorRoute)
+                }
+                .buttonStyle(.plain)
+
+                ForEach(options, id: \.self) { option in
+                    Button {
+                        store.toggleFilter(option, for: stop.id)
+                    } label: {
+                        RouteFilterChip(
+                            title: option,
+                            selected: selectedFilters.contains(option),
+                            mode: store.mode(for: option, at: stop),
+                            colorRoute: store.colorRoute(for: option, at: stop)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func filterEmptyText(for stop: Stop) -> String {
+        switch stop.primaryMode {
+        case .bus:
+            return "Routes appear once TfL data loads."
+        case .nationalRail:
+            return "Platforms appear once National Rail data loads."
+        default:
+            return "Destinations appear once TfL data loads."
+        }
+    }
+}
+
+struct RouteFilterChip: View {
+    let title: String
+    let selected: Bool
+    let mode: TransitMode
+    var colorRoute: String?
+
+    var body: some View {
+        Text(displayRouteLabel(title, mode: mode))
+            .font(.caption.bold())
+            .foregroundStyle(selected ? .white : .primary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .frame(maxWidth: .infinity, minHeight: 24)
+            .padding(.horizontal, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(selected ? mode.color(for: colorRoute) : Color.secondary.opacity(0.12))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(selected ? Color.clear : Color.secondary.opacity(0.22), lineWidth: 1)
+            )
+    }
+}
+
+struct VehiclePlateView: View {
+    let vehicleID: String
+
+    var body: some View {
+        Text(vehicleID.uppercased())
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .foregroundStyle(Color.black.opacity(0.88))
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .padding(.horizontal, 6)
+            .frame(height: 18)
+            .background(
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(Color(red: 1.0, green: 0.82, blue: 0.12))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .stroke(Color.black.opacity(0.5), lineWidth: 1)
+            )
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(Color.blue)
+                    .frame(width: 4)
+                    .clipShape(
+                        UnevenRoundedRectangle(
+                            topLeadingRadius: 3,
+                            bottomLeadingRadius: 3
+                        )
+                    )
+            }
+            .accessibilityLabel("Vehicle \(vehicleID)")
+    }
+}
+
+struct LondonDeparturesBarBoardView: View {
+    @EnvironmentObject private var store: LondonDeparturesBarStore
+    @EnvironmentObject private var actions: AppActions
+    @StateObject private var locationProvider = LocationProvider()
+    @State private var mapPosition: MapCameraPosition = .automatic
+    @State private var searchCenter: CLLocationCoordinate2D?
+    private let focusedMapSpan = MKCoordinateSpan(latitudeDelta: 0.008, longitudeDelta: 0.008)
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                header
+                mapPane
+                selectedStopPane
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(minWidth: 520, minHeight: 560)
+        .navigationTitle("London Departures Bar")
+        .onAppear {
+            focus(on: store.selectedStop.coordinate)
+        }
+        .onReceive(locationProvider.$coordinate.compactMap { $0 }) { coordinate in
+            focus(on: coordinate)
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Stop manager")
+                .font(.largeTitle.bold())
+            Text("Move the map, click a point, and London Departures Bar will show the closest stops and stations around there. Tap one to inspect its arrivals and favourite it.")
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                Button("Use current location") {
+                    locationProvider.requestLocation()
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("Open menu bar") {
+                    actions.open?()
+                }
+                .buttonStyle(.bordered)
+
+                Button("Quit") {
+                    actions.quit?()
+                }
+                .buttonStyle(.bordered)
+
+                Spacer(minLength: 0)
+            }
+
+            if let error = locationProvider.locationError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let searchCenter {
+                Text("Searching near \(searchCenter.latitude, specifier: "%.4f"), \(searchCenter.longitude, specifier: "%.4f")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let nearbySearchError = store.nearbySearchError {
+                Text(nearbySearchError)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if store.nearbyLoading {
+                ProgressView("Loading nearby stops")
+                    .controlSize(.small)
+            }
+        }
+    }
+
+    private var selectedStopPane: some View {
+        section(title: "Selected stop") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(store.selectedStop.name)
+                            .font(.headline)
+                        StopMetaView(stop: store.selectedStop)
+                        Text("Routes: \(store.routeSummary(for: store.selectedStop))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text("Destinations: \(store.destinationSummary(for: store.selectedStop))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 12)
+
+                    Button(store.favouriteIDs.contains(store.selectedStop.id) ? "Remove from favourites" : "Add to favourites") {
+                        store.toggleFavourite(store.selectedStop.id)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                section(title: filterSectionTitle(for: store.selectedStop)) {
+                    RouteFilterPicker(stop: store.selectedStop)
+                }
+
+                VStack(spacing: 8) {
+                    let departures = store.nextDepartures(for: store.selectedStop)
+                    if departures.isEmpty {
+                        Text(departuresEmptyText(for: store.selectedStop))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    ForEach(departures) { departure in
+                        HStack(alignment: .firstTextBaseline) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(alignment: .center, spacing: 6) {
+                                    Button {
+                                    store.toggleFilter(departure.filterKey, for: store.selectedStop.id)
+                                } label: {
+                                    RouteBadge(
+                                        route: departure.departureBadgeLabel,
+                                        mode: departure.mode,
+                                        selected: store.selectedFilters(for: store.selectedStop.id).contains(departure.filterKey),
+                                        colorRoute: store.colorRoute(for: departure, at: store.selectedStop)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+
+                                if departure.showsVehiclePlate, let vehicleID = departure.vehicleID {
+                                    VehiclePlateView(vehicleID: vehicleID)
+                                }
+                                }
+
+                                Text(departure.detailText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer(minLength: 12)
+
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(formatCountdown(until: departure.dueAt, now: store.now))
+                                    .font(.headline)
+                                Text(formatClock(departure.dueAt))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+        }
+    }
+
+    private var mapPane: some View {
+        section(title: "Map") {
+            MapReader { proxy in
+                Map(position: $mapPosition) {
+                    if let searchCenter {
+                        Annotation("Search", coordinate: searchCenter, anchor: .center) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.accentColor.opacity(0.18))
+                                    .frame(width: 24, height: 24)
+                                Circle()
+                                    .stroke(Color.accentColor, lineWidth: 2)
+                                    .frame(width: 12, height: 12)
+                            }
+                        }
+                    }
+
+                    ForEach(store.nearbyStops) { stop in
+                        Annotation(stop.name, coordinate: stop.coordinate, anchor: .bottom) {
+                            Button {
+                                focusOn(stop: stop)
+                            } label: {
+                                StopPinView(
+                                    stop: stop,
+                                    selected: stop.id == store.selectedStopID,
+                                    favourite: store.favouriteIDs.contains(stop.id)
+                                )
+                            }
+                            .contextMenu {
+                                Button(store.favouriteIDs.contains(stop.id) ? "Remove from favourites" : "Add to favourites") {
+                                    store.toggleFavourite(stop.id)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .simultaneousGesture(
+                    SpatialTapGesture()
+                        .onEnded { value in
+                            guard let coordinate = proxy.convert(value.location, from: .local) else { return }
+                            focus(on: coordinate)
+                        }
+                )
+            }
+            .frame(height: 340)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+            )
+        }
+    }
+
+    private func section<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption)
+                .textCase(.uppercase)
+                .foregroundStyle(.secondary)
+            content()
+        }
+    }
+
+    private func focusOn(stop: Stop) {
+        store.selectStop(stop.id)
+        focus(on: stop.coordinate)
+    }
+
+    private func focus(on coordinate: CLLocationCoordinate2D) {
+        let region = MKCoordinateRegion(
+            center: coordinate,
+            span: focusedMapSpan
+        )
+        mapPosition = .region(region)
+        searchCenter = coordinate
+        store.loadNearbyStops(around: coordinate)
+    }
+
+    private func formatClock(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
+    }
+
+    private func departuresEmptyText(for stop: Stop) -> String {
+        store.routeFilterIsActive(for: stop.id) ? "No departures for selected filters" : "No live TfL departures"
+    }
+
+    private func filterSectionTitle(for stop: Stop) -> String {
+        switch stop.primaryMode {
+        case .bus:
+            return "Routes"
+        case .nationalRail:
+            return "Platforms"
+        default:
+            return "Destinations"
+        }
+    }
+
+}
+
+struct StopPinView: View {
+    let stop: Stop
+    let selected: Bool
+    let favourite: Bool
+
+    var body: some View {
+        StopCodeBadge(code: stop.displayCode, size: .small, mode: stop.primaryMode, colorRoute: stop.colorRoute)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(selected ? Color.blue : Color.clear, lineWidth: 2)
+            )
+            .shadow(color: .black.opacity(favourite ? 0.18 : 0.1), radius: 2, y: 1)
+        .padding(.vertical, 2)
+    }
+}
+
+struct StopMetaView: View {
+    let stop: Stop
+
+    private var area: String? {
+        let value = stop.area.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+
+        let lower = value.lowercased()
+        guard lower != "nearby stops" && lower != "map" else { return nil }
+        return value
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let area {
+                Text(area)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !stop.displayCode.isEmpty {
+                StopCodeBadge(code: stop.displayCode, mode: stop.primaryMode, colorRoute: stop.colorRoute)
+            }
+        }
+    }
+}
+
+struct StopCodeBadge: View {
+    enum Size {
+        case regular
+        case small
+    }
+
+    let code: String
+    var size: Size = .regular
+    var mode: TransitMode = .bus
+    var colorRoute: String?
+
+    var body: some View {
+        Text(code)
+            .font(size == .regular ? .caption.bold() : .caption2.bold())
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .frame(minWidth: size == .regular ? 22 : 18, minHeight: size == .regular ? 18 : 16)
+            .padding(.horizontal, size == .regular ? 5 : 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(mode.color(for: colorRoute))
+            )
+    }
+}
+
+struct RouteBadge: View {
+    let route: String
+    let mode: TransitMode
+    var selected: Bool = false
+    var colorRoute: String?
+
+    var body: some View {
+        Text(displayRouteLabel(route, mode: mode))
+            .font(.caption.bold())
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(mode.color(for: colorRoute ?? route))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(selected ? Color.primary.opacity(0.65) : Color.clear, lineWidth: 1.5)
+            )
+    }
+}

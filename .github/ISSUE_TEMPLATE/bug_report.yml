@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible problem.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not include home/work stops, precise personal locations, tokens, or other private data.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the problem and expected behaviour.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use neutral example stops where possible.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "14.0"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Remove personal location data before submitting.
