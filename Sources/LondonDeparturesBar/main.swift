@@ -1320,7 +1320,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         cancellable = store.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                self?.updateStatusItem()
+                DispatchQueue.main.async {
+                    self?.updateStatusItem()
+                }
             }
 
         updateStatusItem()
@@ -1346,9 +1348,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return
         }
         updateStatusItem()
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.show(relativeTo: statusCountdownAnchorRect(in: button), of: button, preferredEdge: .minY)
         clearStatusButtonHighlight()
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func statusCountdownAnchorRect(in button: NSStatusBarButton) -> NSRect {
+        let countdown = statusCountdownText()
+        guard !countdown.isEmpty else {
+            return button.bounds
+        }
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+        ]
+        let textSize = countdown.size(withAttributes: attributes)
+        let countdownHorizontalPadding: CGFloat = 5
+        let countdownWidth = ceil(textSize.width + countdownHorizontalPadding * 2)
+        let anchorWidth = min(button.bounds.width, countdownWidth)
+
+        return NSRect(
+            x: button.bounds.maxX - anchorWidth,
+            y: button.bounds.minY,
+            width: anchorWidth,
+            height: button.bounds.height
+        )
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -1416,6 +1440,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         clearStatusButtonHighlight()
         statusItem?.length = image?.size.width ?? NSStatusItem.variableLength
         button.toolTip = store.statusTooltip
+        if popover?.isShown == true {
+            popover?.positioningRect = statusCountdownAnchorRect(in: button)
+        }
     }
 
     private func clearStatusButtonHighlight() {
