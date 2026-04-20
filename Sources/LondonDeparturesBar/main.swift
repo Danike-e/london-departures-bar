@@ -239,6 +239,16 @@ private func formatCountdown(until dueAt: Date, now: Date) -> String {
     return "\(minutes) mins"
 }
 
+private func formatDepartureBoardCountdown(until dueAt: Date, now: Date) -> String {
+    let seconds = dueAt.timeIntervalSince(now)
+    guard seconds >= 60 else {
+        return "Due"
+    }
+
+    let minutes = max(1, Int(floor(seconds / 60.0)))
+    return "\(minutes)min"
+}
+
 extension MKCoordinateRegion {
     func contains(_ coordinate: CLLocationCoordinate2D) -> Bool {
         let latitudeRange = (center.latitude - span.latitudeDelta / 2)...(center.latitude + span.latitudeDelta / 2)
@@ -689,7 +699,9 @@ final class LondonDeparturesBarStore: ObservableObject {
             ? liveRouteSections.map(\.lineId)
             : stop.routes
 
-        let values = unique(routes).filter { !$0.isEmpty }
+        let values = unique(routes)
+            .filter { !$0.isEmpty }
+            .map { $0.uppercased() }
         return values.isEmpty ? "No routes" : values.prefix(8).joined(separator: ", ")
     }
 
@@ -1413,21 +1425,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .foregroundColor: textColor
         ]
         let countdownAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.menuBarFont(ofSize: 0),
-            .foregroundColor: NSColor.labelColor
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor(calibratedRed: 1.0, green: 0.73, blue: 0.12, alpha: 1)
         ]
         let badgeTextSize = label.size(withAttributes: badgeAttributes)
         let countdownSize = countdown.size(withAttributes: countdownAttributes)
         let badgeHorizontalPadding: CGFloat = 6
         let badgeVerticalPadding: CGFloat = 2
         let interItemSpacing: CGFloat = 5
+        let countdownHorizontalPadding: CGFloat = 5
+        let countdownVerticalPadding: CGFloat = 2
         let badgeSize = NSSize(
             width: ceil(badgeTextSize.width + badgeHorizontalPadding * 2),
             height: ceil(badgeTextSize.height + badgeVerticalPadding * 2)
         )
+        let countdownBadgeSize = NSSize(
+            width: ceil(countdownSize.width + countdownHorizontalPadding * 2),
+            height: ceil(countdownSize.height + countdownVerticalPadding * 2)
+        )
         let imageSize = NSSize(
-            width: ceil(badgeSize.width + interItemSpacing + countdownSize.width + 2),
-            height: ceil(max(badgeSize.height, countdownSize.height))
+            width: ceil(badgeSize.width + interItemSpacing + countdownBadgeSize.width),
+            height: ceil(max(badgeSize.height, countdownBadgeSize.height))
         )
         let image = NSImage(size: imageSize)
         image.lockFocus()
@@ -1449,10 +1467,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             ),
             withAttributes: badgeAttributes
         )
+        NSColor(calibratedRed: 0.02, green: 0.025, blue: 0.018, alpha: 1).setFill()
+        let countdownRect = NSRect(
+            x: badgeSize.width + interItemSpacing,
+            y: (imageSize.height - countdownBadgeSize.height) / 2,
+            width: countdownBadgeSize.width,
+            height: countdownBadgeSize.height
+        )
+        NSBezierPath(
+            roundedRect: countdownRect,
+            xRadius: 3,
+            yRadius: 3
+        ).fill()
         countdown.draw(
             at: NSPoint(
-                x: badgeSize.width + interItemSpacing,
-                y: (imageSize.height - countdownSize.height) / 2
+                x: countdownRect.minX + countdownHorizontalPadding,
+                y: countdownRect.minY + countdownVerticalPadding
             ),
             withAttributes: countdownAttributes
         )
@@ -1477,7 +1507,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return ""
         }
 
-        return formatCountdown(until: next.dueAt, now: store.now)
+        return formatDepartureBoardCountdown(until: next.dueAt, now: store.now)
     }
 
     private func statusForegroundColor(for mode: TransitMode, route: String?) -> NSColor {
@@ -1889,11 +1919,6 @@ struct LondonDeparturesBarBoardView: View {
                     locationProvider.requestLocation()
                 }
                 .buttonStyle(.borderedProminent)
-
-                Button("Open menu bar") {
-                    actions.open?()
-                }
-                .buttonStyle(.bordered)
 
                 Button("Quit") {
                     actions.quit?()
