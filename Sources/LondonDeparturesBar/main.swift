@@ -314,6 +314,7 @@ final class AppActions: ObservableObject {
 @MainActor
 final class LondonDeparturesBarStore: ObservableObject {
     private static let recentLimit = 5
+    private static let nationalRailBaseURL = "https://hux.azurewebsites.net"
 
     @Published var selectedStopID: String
     @Published var selectedArea: String
@@ -880,7 +881,7 @@ final class LondonDeparturesBarStore: ObservableObject {
             return []
         }
 
-        guard let url = URL(string: "https://huxley2.azurewebsites.net/departures/\(crs)/10") else {
+        guard let url = URL(string: "\(nationalRailBaseURL)/departures/\(crs)/10") else {
             return []
         }
 
@@ -938,7 +939,7 @@ final class LondonDeparturesBarStore: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !stationName.isEmpty else { return nil }
         guard let encodedName = stationName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-              let url = URL(string: "https://huxley2.azurewebsites.net/crs/\(encodedName)") else {
+              let url = URL(string: "\(nationalRailBaseURL)/crs/\(encodedName)") else {
             return nil
         }
 
@@ -952,10 +953,30 @@ final class LondonDeparturesBarStore: ObservableObject {
             }
 
             let matches = try JSONDecoder().decode([NationalRailStationMatch].self, from: data)
-            return matches.first?.crsCode.uppercased()
+            return bestCRSMatch(for: stationName, in: matches)?.uppercased()
         } catch {
             return nil
         }
+    }
+
+    private static func bestCRSMatch(for stationName: String, in matches: [NationalRailStationMatch]) -> String? {
+        let query = normalizedStationName(stationName)
+        let londonQuery = normalizedStationName("London \(stationName)")
+        let exactMatch = matches.first { match in
+            let candidate = normalizedStationName(match.stationName)
+            return candidate == query || candidate == londonQuery
+        }
+
+        return (exactMatch ?? matches.first)?.crsCode
+    }
+
+    private static func normalizedStationName(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: #"\s*\([^)]*\)"#, with: "", options: .regularExpression)
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private static func fetchNearbyStops(around coordinate: CLLocationCoordinate2D) async -> [Stop] {

@@ -1,5 +1,11 @@
 # Releases
 
+## v1.0.2 - 2026-04-20
+
+- Fixed National Rail departures not loading by switching Huxley rail lookups to the working `hux.azurewebsites.net` endpoint.
+- Improved CRS station matching so London station lookups prefer exact or London-prefixed matches before falling back to the first result.
+- Bumped the app version to 1.0.2 with build number 3.
+
 ## v1.0.1 - 2026-04-20
 
 - Restyled the closed menu bar countdown so the route badge stays unchanged while the time-to-departure appears as a compact black departure-board tile.
