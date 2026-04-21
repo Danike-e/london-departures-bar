@@ -1463,15 +1463,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func updateStatusItem() {
-        guard let button = statusItem?.button else { return }
+        guard let statusItem, let button = statusItem.button else {
+            log("status item update skipped: missing button")
+            return
+        }
         let image = statusImage()
         button.image = image
         button.imagePosition = .imageOnly
         button.attributedTitle = NSAttributedString(string: "")
         button.title = ""
+        button.imageScaling = .scaleProportionallyDown
         clearStatusButtonHighlight()
-        statusItem?.length = image?.size.width ?? NSStatusItem.variableLength
+        statusItem.length = NSStatusItem.variableLength
         button.toolTip = store.statusTooltip
+        log("status item updated width=\(image?.size.width ?? 0) departures=\(store.departures.count) label=\(statusServiceLabel())")
         if popover?.isShown == true {
             popover?.positioningRect = statusCountdownAnchorRect(in: button)
         }
@@ -1593,7 +1598,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func statusServiceLabel() -> String {
         guard let next = store.departures.first else {
-            return "London Departures Bar"
+            return "LDB"
         }
 
         let label = next.mode == .bus
