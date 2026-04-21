@@ -123,6 +123,9 @@ enum TransitMode: String, Codable {
 
         switch self {
         case .bus:
+            if Self.normalizedRoute(route) == "BL1" {
+                return Self.bakerlooBrown.color
+            }
             return RGB(220, 36, 31).color
         case .tram:
             return RGB(95, 181, 38).color
@@ -150,6 +153,9 @@ enum TransitMode: String, Codable {
 
         switch self {
         case .bus:
+            if Self.normalizedRoute(route) == "BL1" {
+                return Self.bakerlooBrown.nsColor
+            }
             return RGB(220, 36, 31).nsColor
         case .tram:
             return RGB(95, 181, 38).nsColor
@@ -184,6 +190,14 @@ enum TransitMode: String, Codable {
         var nsColor: NSColor {
             NSColor(calibratedRed: red / 255, green: green / 255, blue: blue / 255, alpha: 1)
         }
+    }
+
+    private static let bakerlooBrown = RGB(178, 99, 0)
+
+    private static func normalizedRoute(_ route: String?) -> String {
+        route?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased() ?? ""
     }
 
     private static func tubeLineRGB(for route: String) -> RGB {
