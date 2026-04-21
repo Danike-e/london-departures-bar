@@ -123,8 +123,12 @@ enum TransitMode: String, Codable {
 
         switch self {
         case .bus:
-            if Self.normalizedRoute(route) == "BL1" {
+            let normalizedRoute = Self.normalizedRoute(route)
+            if normalizedRoute == "BL1" {
                 return Self.bakerlooBrown.color
+            }
+            if normalizedRoute.hasPrefix("N") {
+                return Self.nightBusBlue.color
             }
             return RGB(220, 36, 31).color
         case .tram:
@@ -153,8 +157,12 @@ enum TransitMode: String, Codable {
 
         switch self {
         case .bus:
-            if Self.normalizedRoute(route) == "BL1" {
+            let normalizedRoute = Self.normalizedRoute(route)
+            if normalizedRoute == "BL1" {
                 return Self.bakerlooBrown.nsColor
+            }
+            if normalizedRoute.hasPrefix("N") {
+                return Self.nightBusBlue.nsColor
             }
             return RGB(220, 36, 31).nsColor
         case .tram:
@@ -193,6 +201,7 @@ enum TransitMode: String, Codable {
     }
 
     private static let bakerlooBrown = RGB(178, 99, 0)
+    private static let nightBusBlue = RGB(195, 216, 237)
     private static let superloopRGB = [
         RGB(0, 174, 239),
         RGB(255, 130, 0),
@@ -210,6 +219,14 @@ enum TransitMode: String, Codable {
 
     static func usesSuperloopColors(mode: TransitMode, route: String?) -> Bool {
         mode == .bus && normalizedRoute(route).hasPrefix("SL")
+    }
+
+    static func usesNightBusColor(mode: TransitMode, route: String?) -> Bool {
+        let normalizedRoute = normalizedRoute(route)
+        return mode == .bus
+            && normalizedRoute.hasPrefix("N")
+            && normalizedRoute != "BL1"
+            && !normalizedRoute.hasPrefix("SL")
     }
 
     private static func normalizedRoute(_ route: String?) -> String {
@@ -554,15 +571,37 @@ final class LondonDeparturesBarStore: ObservableObject {
     }
 
     func filterOptions(for stop: Stop) -> [String] {
-        let values = liveArrivalsStopID == stop.id && !liveArrivals.isEmpty
-            ? liveArrivals.map(\.filterLabel)
-            : stop.primaryMode == .bus
-            ? (stop.id == liveRouteSectionsStopID && !liveRouteSections.isEmpty ? liveRouteSections.map(\.lineId) : stop.routes)
-            : stop.destinations
+        let values: [String]
+        if stop.primaryMode == .bus {
+            let liveRouteLabels = liveArrivalsStopID == stop.id ? liveArrivals.map(\.filterLabel) : []
+            let liveRouteSectionLabels = stop.id == liveRouteSectionsStopID ? liveRouteSections.map(\.lineId) : []
+            values = stop.routes + liveRouteSectionLabels + liveRouteLabels
+        } else {
+            values = liveArrivalsStopID == stop.id && !liveArrivals.isEmpty
+                ? liveArrivals.map(\.filterLabel)
+                : stop.destinations
+        }
 
-        return unique(values)
+        return (stop.primaryMode == .bus ? uniqueBusRoutes(values) : unique(values))
             .filter { !$0.isEmpty }
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    private func uniqueBusRoutes(_ routes: [String]) -> [String] {
+        var seen = Set<String>()
+        var values: [String] = []
+
+        for route in routes {
+            let trimmed = route.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            let display = displayRouteLabel(trimmed, mode: .bus)
+            let key = display.uppercased()
+            guard seen.insert(key).inserted else { continue }
+            values.append(display)
+        }
+
+        return values
     }
 
     func mode(for filter: String, at stop: Stop) -> TransitMode {
@@ -1616,6 +1655,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func statusForegroundColor(for mode: TransitMode, route: String?) -> NSColor {
+        if TransitMode.usesNightBusColor(mode: mode, route: route) {
+            return NSColor(calibratedWhite: 0.12, alpha: 1)
+        }
+
         guard mode == .tube else {
             return .white
         }
@@ -1932,16 +1975,17 @@ struct RouteFilterChip: View {
     var colorRoute: String?
 
     var body: some View {
+        let route = colorRoute ?? title
         Text(displayRouteLabel(title, mode: mode))
             .font(.caption.bold())
-            .foregroundStyle(selected ? .white : .primary)
+            .foregroundStyle(selected && !TransitMode.usesNightBusColor(mode: mode, route: route) ? Color.white : Color.primary)
             .lineLimit(1)
             .minimumScaleFactor(0.7)
             .frame(maxWidth: .infinity, minHeight: 24)
             .padding(.horizontal, 7)
             .background {
                 if selected {
-                    RouteColorBackground(route: colorRoute ?? title, mode: mode, cornerRadius: 6)
+                    RouteColorBackground(route: route, mode: mode, cornerRadius: 6)
                 } else {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(Color.secondary.opacity(0.12))
@@ -2338,14 +2382,15 @@ struct RouteBadge: View {
     var colorRoute: String?
 
     var body: some View {
+        let badgeRoute = colorRoute ?? route
         Text(displayRouteLabel(route, mode: mode))
             .font(.caption.bold())
-            .foregroundStyle(.white)
+            .foregroundStyle(TransitMode.usesNightBusColor(mode: mode, route: badgeRoute) ? Color.primary : Color.white)
             .lineLimit(1)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
             .background {
-                RouteColorBackground(route: colorRoute ?? route, mode: mode, cornerRadius: 4)
+                RouteColorBackground(route: badgeRoute, mode: mode, cornerRadius: 4)
             }
             .overlay(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
