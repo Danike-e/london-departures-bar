@@ -193,6 +193,24 @@ enum TransitMode: String, Codable {
     }
 
     private static let bakerlooBrown = RGB(178, 99, 0)
+    private static let superloopRGB = [
+        RGB(0, 174, 239),
+        RGB(255, 130, 0),
+        RGB(214, 0, 132),
+        RGB(118, 208, 0)
+    ]
+
+    static var superloopColors: [Color] {
+        superloopRGB.map(\.color)
+    }
+
+    static var superloopNSColors: [NSColor] {
+        superloopRGB.map(\.nsColor)
+    }
+
+    static func usesSuperloopColors(mode: TransitMode, route: String?) -> Bool {
+        mode == .bus && normalizedRoute(route).hasPrefix("SL")
+    }
 
     private static func normalizedRoute(_ route: String?) -> String {
         route?
@@ -1511,17 +1529,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         )
         let image = NSImage(size: imageSize)
         image.lockFocus()
-        backgroundColor.setFill()
-        NSBezierPath(
-            roundedRect: NSRect(
-                x: 0,
-                y: (imageSize.height - badgeSize.height) / 2,
-                width: badgeSize.width,
-                height: badgeSize.height
-            ),
+        let badgeRect = NSRect(
+            x: 0,
+            y: (imageSize.height - badgeSize.height) / 2,
+            width: badgeSize.width,
+            height: badgeSize.height
+        )
+        let badgePath = NSBezierPath(
+            roundedRect: badgeRect,
             xRadius: 4,
             yRadius: 4
-        ).fill()
+        )
+        if TransitMode.usesSuperloopColors(mode: next?.mode ?? .bus, route: next?.route) {
+            NSGraphicsContext.saveGraphicsState()
+            badgePath.addClip()
+            let stripeWidth = badgeRect.width / CGFloat(TransitMode.superloopNSColors.count)
+            for (index, color) in TransitMode.superloopNSColors.enumerated() {
+                color.setFill()
+                NSRect(
+                    x: badgeRect.minX + CGFloat(index) * stripeWidth,
+                    y: badgeRect.minY,
+                    width: index == TransitMode.superloopNSColors.count - 1
+                        ? badgeRect.maxX - (badgeRect.minX + CGFloat(index) * stripeWidth)
+                        : stripeWidth,
+                    height: badgeRect.height
+                ).fill()
+            }
+            NSGraphicsContext.restoreGraphicsState()
+        } else {
+            backgroundColor.setFill()
+            badgePath.fill()
+        }
         label.draw(
             at: NSPoint(
                 x: badgeHorizontalPadding,
@@ -1896,14 +1934,38 @@ struct RouteFilterChip: View {
             .minimumScaleFactor(0.7)
             .frame(maxWidth: .infinity, minHeight: 24)
             .padding(.horizontal, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(selected ? mode.color(for: colorRoute) : Color.secondary.opacity(0.12))
-            )
+            .background {
+                if selected {
+                    RouteColorBackground(route: colorRoute ?? title, mode: mode, cornerRadius: 6)
+                } else {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.secondary.opacity(0.12))
+                }
+            }
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .stroke(selected ? Color.clear : Color.secondary.opacity(0.22), lineWidth: 1)
             )
+    }
+}
+
+struct RouteColorBackground: View {
+    let route: String?
+    let mode: TransitMode
+    let cornerRadius: CGFloat
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if TransitMode.usesSuperloopColors(mode: mode, route: route) {
+            HStack(spacing: 0) {
+                ForEach(Array(TransitMode.superloopColors.enumerated()), id: \.offset) { _, color in
+                    color
+                }
+            }
+            .clipShape(shape)
+        } else {
+            shape.fill(mode.color(for: route))
+        }
     }
 }
 
@@ -2277,10 +2339,9 @@ struct RouteBadge: View {
             .lineLimit(1)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(mode.color(for: colorRoute ?? route))
-            )
+            .background {
+                RouteColorBackground(route: colorRoute ?? route, mode: mode, cornerRadius: 4)
+            }
             .overlay(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .stroke(selected ? Color.primary.opacity(0.65) : Color.clear, lineWidth: 1.5)
