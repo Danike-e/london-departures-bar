@@ -87,6 +87,64 @@ struct Departure: Identifiable {
     }
 }
 
+struct RoutePreviewRequest: Identifiable, Equatable {
+    let route: String
+    let mode: TransitMode
+    let colorRoute: String?
+    let originStopName: String
+    let destination: String
+
+    var id: String {
+        "\(mode.rawValue)-\(lineID)-\(originStopName)-\(destination)"
+    }
+
+    var displayRoute: String {
+        displayRouteLabel(route, mode: mode)
+    }
+
+    var lineID: String {
+        TransitMode.lineID(for: colorRoute ?? route, mode: mode)
+    }
+}
+
+struct RoutePreview {
+    let lineID: String
+    let lineName: String
+    let mode: TransitMode
+    let lineStrings: [[CLLocationCoordinate2D]]
+    let stopSequences: [RouteStopSequence]
+
+    var allCoordinates: [CLLocationCoordinate2D] {
+        lineStrings.flatMap { $0 }
+    }
+
+    var primaryStopSequence: RouteStopSequence? {
+        stopSequences.max { lhs, rhs in
+            lhs.stops.count < rhs.stops.count
+        }
+    }
+}
+
+struct RouteStopSequence: Identifiable {
+    let id: String
+    let direction: String
+    let stops: [RouteStop]
+
+    var summary: String {
+        guard let first = stops.first, let last = stops.last else {
+            return direction.capitalized
+        }
+
+        return "\(direction.capitalized): \(first.name) to \(last.name)"
+    }
+}
+
+struct RouteStop: Identifiable {
+    let id: String
+    let name: String
+    let coordinate: CLLocationCoordinate2D
+}
+
 enum TransitMode: String, Codable {
     case bus
     case tram
@@ -229,6 +287,25 @@ enum TransitMode: String, Codable {
             && !normalizedRoute.hasPrefix("SL")
     }
 
+    static func lineID(for route: String, mode: TransitMode) -> String {
+        switch mode {
+        case .bus:
+            return normalizedRoute(route).lowercased()
+        case .dlr:
+            return "dlr"
+        case .elizabethLine:
+            return "elizabeth"
+        default:
+            return route
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+                .replacingOccurrences(of: "&", with: "and")
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty }
+                .joined(separator: "-")
+        }
+    }
+
     private static func normalizedRoute(_ route: String?) -> String {
         route?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -357,6 +434,7 @@ final class LocationProvider: NSObject, ObservableObject, CLLocationManagerDeleg
 @MainActor
 final class AppActions: ObservableObject {
     var open: (() -> Void)?
+    var openRoutePreview: ((RoutePreviewRequest) -> Void)?
     var quit: (() -> Void)?
 }
 
@@ -636,6 +714,19 @@ final class LondonDeparturesBarStore: ObservableObject {
         }
 
         return colorRoute(for: departure.filterKey, at: stop)
+    }
+
+    func routePreviewRequest(for departure: Departure, at stop: Stop) -> RoutePreviewRequest {
+        let route = departure.mode == .bus
+            ? departure.route
+            : colorRoute(for: departure, at: stop) ?? departure.route
+        return RoutePreviewRequest(
+            route: route,
+            mode: departure.mode,
+            colorRoute: colorRoute(for: departure, at: stop),
+            originStopName: stop.name,
+            destination: departure.destination
+        )
     }
 
     func selectedFilters(for stopID: String) -> Set<String> {
@@ -945,6 +1036,80 @@ final class LondonDeparturesBarStore: ObservableObject {
         } catch {
             return []
         }
+    }
+
+    static func fetchRoutePreview(for request: RoutePreviewRequest) async throws -> RoutePreview {
+        guard request.mode != .nationalRail else {
+            throw RoutePreviewError.unsupportedMode
+        }
+
+        guard let encodedLineID = request.lineID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "https://api.tfl.gov.uk/Line/\(encodedLineID)/Route/Sequence/all?serviceTypes=Regular") else {
+            throw RoutePreviewError.invalidRoute
+        }
+
+        var urlRequest = URLRequest(url: url)
+        urlRequest.setValue("LondonDeparturesBar/1.0", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw RoutePreviewError.routeUnavailable
+        }
+
+        let decoded = try JSONDecoder().decode(TfLRouteSequenceResponse.self, from: data)
+        let lineStrings = decoded.lineStrings.flatMap(Self.coordinates(fromLineString:)).filter { !$0.isEmpty }
+        let sequences = decoded.stopPointSequences.map { sequence in
+            RouteStopSequence(
+                id: "\(sequence.direction)-\(sequence.branchId)",
+                direction: sequence.direction,
+                stops: sequence.stopPoint.compactMap { stop in
+                    guard let latitude = stop.lat, let longitude = stop.lon else { return nil }
+                    return RouteStop(
+                        id: stop.id,
+                        name: stop.name,
+                        coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+                    )
+                }
+            )
+        }
+
+        guard !lineStrings.isEmpty || sequences.contains(where: { !$0.stops.isEmpty }) else {
+            throw RoutePreviewError.routeUnavailable
+        }
+
+        return RoutePreview(
+            lineID: decoded.lineId,
+            lineName: decoded.lineName,
+            mode: Self.mode(from: decoded.mode),
+            lineStrings: lineStrings,
+            stopSequences: sequences
+        )
+    }
+
+    nonisolated private static func coordinates(fromLineString value: String) -> [[CLLocationCoordinate2D]] {
+        guard let data = value.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? [Any] else {
+            return []
+        }
+
+        return coordinateGroups(from: parsed)
+    }
+
+    nonisolated private static func coordinateGroups(from value: Any) -> [[CLLocationCoordinate2D]] {
+        if let pair = value as? [Double], pair.count >= 2 {
+            return [[CLLocationCoordinate2D(latitude: pair[1], longitude: pair[0])]]
+        }
+
+        guard let values = value as? [Any] else {
+            return []
+        }
+
+        let nested = values.flatMap(coordinateGroups)
+        if nested.count > 1, nested.allSatisfy({ $0.count == 1 }) {
+            return [nested.flatMap { $0 }]
+        }
+
+        return nested
     }
 
     private static func fetchNationalRailDepartures(for stop: Stop) async -> [Departure] {
@@ -1313,6 +1478,44 @@ struct TfLRouteSection: Decodable {
     let isActive: Bool?
 }
 
+enum RoutePreviewError: LocalizedError {
+    case invalidRoute
+    case routeUnavailable
+    case unsupportedMode
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidRoute:
+            return "This route could not be opened."
+        case .routeUnavailable:
+            return "TfL did not return a route map for this service."
+        case .unsupportedMode:
+            return "Route maps are available for TfL services only."
+        }
+    }
+}
+
+private struct TfLRouteSequenceResponse: Decodable {
+    let lineId: String
+    let lineName: String
+    let mode: String?
+    let lineStrings: [String]
+    let stopPointSequences: [TfLStopPointSequence]
+}
+
+private struct TfLStopPointSequence: Decodable {
+    let direction: String
+    let branchId: Int
+    let stopPoint: [TfLMatchedStop]
+}
+
+private struct TfLMatchedStop: Decodable {
+    let id: String
+    let name: String
+    let lat: Double?
+    let lon: Double?
+}
+
 private struct TfLNearbyStopsResponse: Decodable {
     let stopPoints: [TfLStopPointRecord]
 }
@@ -1356,6 +1559,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var standaloneWindow: NSWindow?
+    private var routePreviewWindow: NSWindow?
     private var cancellable: AnyCancellable?
     private let logURL = URL(fileURLWithPath: "/tmp/londonDeparturesBar.log")
 
@@ -1363,6 +1567,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         log("launch")
         NSApplication.shared.setActivationPolicy(.accessory)
         actions.open = { [weak self] in self?.showStandaloneWindow() }
+        actions.openRoutePreview = { [weak self] request in self?.showRoutePreviewWindow(for: request) }
         actions.quit = { [weak self] in self?.quitApp() }
 
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -1479,6 +1684,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         positionStandaloneWindow()
         standaloneWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func showRoutePreviewWindow(for request: RoutePreviewRequest) {
+        if popover?.isShown == true {
+            popover?.performClose(nil)
+        }
+
+        let rootView = RoutePreviewWindowView(request: request)
+            .environmentObject(store)
+            .environmentObject(actions)
+        let controller = NSHostingController(rootView: rootView)
+
+        if routePreviewWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 680, height: 700),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+            window.isReleasedWhenClosed = false
+            routePreviewWindow = window
+        }
+
+        routePreviewWindow?.title = "\(request.displayRoute) Route"
+        routePreviewWindow?.contentViewController = controller
+        positionRoutePreviewWindow()
+        routePreviewWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func positionRoutePreviewWindow() {
+        guard let window = routePreviewWindow,
+              let screen = window.screen ?? NSScreen.main else {
+            return
+        }
+
+        let visibleFrame = screen.visibleFrame
+        let targetWidth = min(680, max(540, visibleFrame.width - 80))
+        let targetHeight = min(700, max(620, visibleFrame.height - 80))
+        window.setContentSize(NSSize(width: targetWidth, height: targetHeight))
+        let frame = window.frame
+        let originX = visibleFrame.midX - frame.width / 2
+        let originY = max(visibleFrame.minY + 24, visibleFrame.maxY - frame.height - 56)
+        window.setFrameOrigin(NSPoint(x: originX, y: originY))
     }
 
     private func positionStandaloneWindow() {
@@ -1720,13 +1972,15 @@ struct LondonDeparturesBarMenuView: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         HStack(alignment: .center, spacing: 6) {
                                             Button {
-                                                store.toggleFilter(departure.filterKey, for: store.selectedStop.id)
+                                                actions.openRoutePreview?(
+                                                    store.routePreviewRequest(for: departure, at: store.selectedStop)
+                                                )
                                             } label: {
                                                 RouteBadge(
                                                     route: departure.departureBadgeLabel,
                                                     mode: departure.mode,
                                                     selected: store.selectedFilters(for: store.selectedStop.id).contains(departure.filterKey),
-                                                colorRoute: store.colorRoute(for: departure, at: store.selectedStop)
+                                                    colorRoute: store.colorRoute(for: departure, at: store.selectedStop)
                                                 )
                                             }
                                             .buttonStyle(.plain)
@@ -2052,6 +2306,176 @@ struct VehiclePlateView: View {
     }
 }
 
+struct RoutePreviewWindowView: View {
+    let request: RoutePreviewRequest
+    @State private var preview: RoutePreview?
+    @State private var errorMessage: String?
+    @State private var loading = false
+    @State private var mapPosition: MapCameraPosition = .automatic
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+
+            if loading {
+                ProgressView("Loading route")
+                    .controlSize(.small)
+            } else if let errorMessage {
+                Text(errorMessage)
+                    .foregroundStyle(.secondary)
+            }
+
+            mapPane
+
+            if let sequence = preview?.primaryStopSequence {
+                stopSequence(sequence)
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 540, minHeight: 620)
+        .task(id: request.id) {
+            await loadRoutePreview()
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            RouteBadge(
+                route: request.displayRoute,
+                mode: request.mode,
+                colorRoute: request.colorRoute ?? request.route
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(preview?.lineName ?? request.displayRoute)
+                    .font(.title2.bold())
+                Text(summaryText)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var summaryText: String {
+        if let sequence = preview?.primaryStopSequence {
+            return sequence.summary
+        }
+
+        let destination = request.destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        return destination.isEmpty
+            ? "From \(request.originStopName)"
+            : "From \(request.originStopName) towards \(destination)"
+    }
+
+    private var mapPane: some View {
+        Map(position: $mapPosition) {
+            if let preview {
+                ForEach(Array(preview.lineStrings.enumerated()), id: \.offset) { _, coordinates in
+                    MapPolyline(coordinates: coordinates)
+                        .stroke(routeColor(for: preview), lineWidth: 4)
+                }
+
+                if let sequence = preview.primaryStopSequence {
+                    ForEach(Array(sequence.stops.enumerated()), id: \.offset) { _, stop in
+                        Annotation(stop.name, coordinate: stop.coordinate, anchor: .center) {
+                            Circle()
+                                .fill(routeColor(for: preview))
+                                .frame(width: 7, height: 7)
+                                .overlay(Circle().stroke(.white, lineWidth: 1.5))
+                        }
+                    }
+                }
+            }
+        }
+        .frame(height: 380)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+        )
+    }
+
+    private func stopSequence(_ sequence: RouteStopSequence) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Stops")
+                .font(.caption)
+                .textCase(.uppercase)
+                .foregroundStyle(.secondary)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(sequence.stops.enumerated()), id: \.offset) { index, stop in
+                        HStack(spacing: 8) {
+                            Text("\(index + 1)")
+                                .font(.caption2.bold())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 22, alignment: .trailing)
+                            Text(stop.name)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .frame(maxHeight: 150)
+        }
+    }
+
+    private func loadRoutePreview() async {
+        loading = true
+        errorMessage = nil
+        preview = nil
+
+        do {
+            let loaded = try await LondonDeparturesBarStore.fetchRoutePreview(for: request)
+            preview = loaded
+            mapPosition = routeMapPosition(for: loaded)
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            mapPosition = .automatic
+        }
+
+        loading = false
+    }
+
+    private func routeColor(for preview: RoutePreview) -> Color {
+        preview.mode.color(for: request.colorRoute ?? preview.lineName)
+    }
+
+    private func routeMapPosition(for preview: RoutePreview) -> MapCameraPosition {
+        let coordinates = preview.allCoordinates.isEmpty
+            ? preview.stopSequences.flatMap { $0.stops.map(\.coordinate) }
+            : preview.allCoordinates
+        guard let region = region(containing: coordinates) else {
+            return .automatic
+        }
+
+        return .region(region)
+    }
+
+    private func region(containing coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion? {
+        guard let first = coordinates.first else { return nil }
+        let latitudes = coordinates.map(\.latitude)
+        let longitudes = coordinates.map(\.longitude)
+        let minLatitude = latitudes.min() ?? first.latitude
+        let maxLatitude = latitudes.max() ?? first.latitude
+        let minLongitude = longitudes.min() ?? first.longitude
+        let maxLongitude = longitudes.max() ?? first.longitude
+        let center = CLLocationCoordinate2D(
+            latitude: (minLatitude + maxLatitude) / 2,
+            longitude: (minLongitude + maxLongitude) / 2
+        )
+        let span = MKCoordinateSpan(
+            latitudeDelta: max(0.012, (maxLatitude - minLatitude) * 1.25),
+            longitudeDelta: max(0.012, (maxLongitude - minLongitude) * 1.25)
+        )
+        return MKCoordinateRegion(center: center, span: span)
+    }
+}
+
 struct LondonDeparturesBarBoardView: View {
     @EnvironmentObject private var store: LondonDeparturesBarStore
     @EnvironmentObject private var actions: AppActions
@@ -2168,20 +2592,22 @@ struct LondonDeparturesBarBoardView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 HStack(alignment: .center, spacing: 6) {
                                     Button {
-                                    store.toggleFilter(departure.filterKey, for: store.selectedStop.id)
-                                } label: {
-                                    RouteBadge(
-                                        route: departure.departureBadgeLabel,
-                                        mode: departure.mode,
-                                        selected: store.selectedFilters(for: store.selectedStop.id).contains(departure.filterKey),
-                                        colorRoute: store.colorRoute(for: departure, at: store.selectedStop)
-                                    )
-                                }
-                                .buttonStyle(.plain)
+                                        actions.openRoutePreview?(
+                                            store.routePreviewRequest(for: departure, at: store.selectedStop)
+                                        )
+                                    } label: {
+                                        RouteBadge(
+                                            route: departure.departureBadgeLabel,
+                                            mode: departure.mode,
+                                            selected: store.selectedFilters(for: store.selectedStop.id).contains(departure.filterKey),
+                                            colorRoute: store.colorRoute(for: departure, at: store.selectedStop)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
 
-                                if departure.showsVehiclePlate, let vehicleID = departure.vehicleID {
-                                    VehiclePlateView(vehicleID: vehicleID)
-                                }
+                                    if departure.showsVehiclePlate, let vehicleID = departure.vehicleID {
+                                        VehiclePlateView(vehicleID: vehicleID)
+                                    }
                                 }
 
                                 Text(departure.detailText)
