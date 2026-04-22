@@ -115,7 +115,8 @@ struct RoutePreview {
     let stopSequences: [RouteStopSequence]
 
     var allCoordinates: [CLLocationCoordinate2D] {
-        lineStrings.flatMap { $0 }
+        let sequenceCoordinates = stopSequences.flatMap { $0.routeCoordinates }
+        return sequenceCoordinates.isEmpty ? lineStrings.flatMap { $0 } : sequenceCoordinates
     }
 
     var primaryStopSequence: RouteStopSequence? {
@@ -128,14 +129,24 @@ struct RoutePreview {
 struct RouteStopSequence: Identifiable {
     let id: String
     let direction: String
+    let lineStrings: [[CLLocationCoordinate2D]]
     let stops: [RouteStop]
+
+    var displayDirection: String {
+        direction.capitalized
+    }
 
     var summary: String {
         guard let first = stops.first, let last = stops.last else {
-            return direction.capitalized
+            return displayDirection
         }
 
-        return "\(direction.capitalized): \(first.name) to \(last.name)"
+        return "\(displayDirection): \(first.name) to \(last.name)"
+    }
+
+    var routeCoordinates: [CLLocationCoordinate2D] {
+        let coordinates = lineStrings.flatMap { $0 }
+        return coordinates.isEmpty ? stops.map(\.coordinate) : coordinates
     }
 }
 
@@ -1058,10 +1069,12 @@ final class LondonDeparturesBarStore: ObservableObject {
 
         let decoded = try JSONDecoder().decode(TfLRouteSequenceResponse.self, from: data)
         let lineStrings = decoded.lineStrings.flatMap(Self.coordinates(fromLineString:)).filter { !$0.isEmpty }
-        let sequences = decoded.stopPointSequences.map { sequence in
-            RouteStopSequence(
+        let sequences = decoded.stopPointSequences.enumerated().map { index, sequence in
+            let sequenceLineStrings = index < lineStrings.count ? [lineStrings[index]] : []
+            return RouteStopSequence(
                 id: "\(sequence.direction)-\(sequence.branchId)",
                 direction: sequence.direction,
+                lineStrings: sequenceLineStrings,
                 stops: sequence.stopPoint.compactMap { stop in
                     guard let latitude = stop.lat, let longitude = stop.lon else { return nil }
                     return RouteStop(
@@ -1581,7 +1594,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         let popover = NSPopover()
-        popover.behavior = .transient
+        popover.behavior = .semitransient
         popover.delegate = self
         popover.contentSize = NSSize(width: 400, height: 440)
         popover.contentViewController = NSHostingController(
@@ -1687,10 +1700,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func showRoutePreviewWindow(for request: RoutePreviewRequest) {
-        if popover?.isShown == true {
-            popover?.performClose(nil)
-        }
-
         let rootView = RoutePreviewWindowView(request: request)
             .environmentObject(store)
             .environmentObject(actions)
@@ -1728,9 +1737,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let targetHeight = min(700, max(620, visibleFrame.height - 80))
         window.setContentSize(NSSize(width: targetWidth, height: targetHeight))
         let frame = window.frame
-        let originX = visibleFrame.midX - frame.width / 2
+        let originX = routePreviewOriginX(for: frame, in: visibleFrame)
         let originY = max(visibleFrame.minY + 24, visibleFrame.maxY - frame.height - 56)
         window.setFrameOrigin(NSPoint(x: originX, y: originY))
+    }
+
+    private func routePreviewOriginX(for frame: NSRect, in visibleFrame: NSRect) -> CGFloat {
+        let minimumX = visibleFrame.minX + 24
+        let maximumX = visibleFrame.maxX - frame.width - 24
+        let fallbackX = visibleFrame.midX - frame.width / 2 - 180
+
+        guard let button = statusItem?.button,
+              let buttonWindow = button.window else {
+            return min(max(fallbackX, minimumX), maximumX)
+        }
+
+        let buttonFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
+        let popoverWidth = popover?.contentSize.width ?? 400
+        let popoverLeftEdge = buttonFrame.midX - popoverWidth / 2
+        let preferredX = popoverLeftEdge - frame.width - 18
+        return min(max(preferredX, minimumX), maximumX)
     }
 
     private func positionStandaloneWindow() {
@@ -2309,6 +2335,7 @@ struct VehiclePlateView: View {
 struct RoutePreviewWindowView: View {
     let request: RoutePreviewRequest
     @State private var preview: RoutePreview?
+    @State private var selectedSequenceID: String?
     @State private var errorMessage: String?
     @State private var loading = false
     @State private var mapPosition: MapCameraPosition = .automatic
@@ -2325,9 +2352,10 @@ struct RoutePreviewWindowView: View {
                     .foregroundStyle(.secondary)
             }
 
+            directionPicker
             mapPane
 
-            if let sequence = preview?.primaryStopSequence {
+            if let sequence = selectedSequence {
                 stopSequence(sequence)
             }
         }
@@ -2359,7 +2387,7 @@ struct RoutePreviewWindowView: View {
     }
 
     private var summaryText: String {
-        if let sequence = preview?.primaryStopSequence {
+        if let sequence = selectedSequence {
             return sequence.summary
         }
 
@@ -2369,22 +2397,52 @@ struct RoutePreviewWindowView: View {
             : "From \(request.originStopName) towards \(destination)"
     }
 
+    @ViewBuilder
+    private var directionPicker: some View {
+        if let preview, preview.stopSequences.count > 1 {
+            Picker("Direction", selection: Binding(
+                get: { selectedSequenceID ?? preview.primaryStopSequence?.id ?? preview.stopSequences[0].id },
+                set: { id in
+                    selectedSequenceID = id
+                    if let sequence = preview.stopSequences.first(where: { $0.id == id }) {
+                        mapPosition = routeMapPosition(for: sequence)
+                    }
+                }
+            )) {
+                ForEach(preview.stopSequences) { sequence in
+                    Text(sequence.displayDirection)
+                        .tag(sequence.id)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var selectedSequence: RouteStopSequence? {
+        guard let preview else { return nil }
+        if let selectedSequenceID,
+           let sequence = preview.stopSequences.first(where: { $0.id == selectedSequenceID }) {
+            return sequence
+        }
+
+        return preview.primaryStopSequence
+    }
+
     private var mapPane: some View {
         Map(position: $mapPosition) {
-            if let preview {
-                ForEach(Array(preview.lineStrings.enumerated()), id: \.offset) { _, coordinates in
+            if let preview, let sequence = selectedSequence {
+                let lineStrings = sequence.lineStrings.isEmpty ? [sequence.stops.map(\.coordinate)] : sequence.lineStrings
+                ForEach(Array(lineStrings.enumerated()), id: \.offset) { _, coordinates in
                     MapPolyline(coordinates: coordinates)
                         .stroke(routeColor(for: preview), lineWidth: 4)
                 }
 
-                if let sequence = preview.primaryStopSequence {
-                    ForEach(Array(sequence.stops.enumerated()), id: \.offset) { _, stop in
-                        Annotation(stop.name, coordinate: stop.coordinate, anchor: .center) {
-                            Circle()
-                                .fill(routeColor(for: preview))
-                                .frame(width: 7, height: 7)
-                                .overlay(Circle().stroke(.white, lineWidth: 1.5))
-                        }
+                ForEach(Array(sequence.stops.enumerated()), id: \.offset) { _, stop in
+                    Annotation(stop.name, coordinate: stop.coordinate, anchor: .center) {
+                        Circle()
+                            .fill(routeColor(for: preview))
+                            .frame(width: 7, height: 7)
+                            .overlay(Circle().stroke(.white, lineWidth: 1.5))
                     }
                 }
             }
@@ -2432,9 +2490,13 @@ struct RoutePreviewWindowView: View {
         do {
             let loaded = try await LondonDeparturesBarStore.fetchRoutePreview(for: request)
             preview = loaded
-            mapPosition = routeMapPosition(for: loaded)
+            selectedSequenceID = preferredSequence(in: loaded)?.id
+            mapPosition = selectedSequenceID
+                .flatMap { id in loaded.stopSequences.first(where: { $0.id == id }) }
+                .map(routeMapPosition(for:)) ?? routeMapPosition(for: loaded)
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            selectedSequenceID = nil
             mapPosition = .automatic
         }
 
@@ -2454,6 +2516,27 @@ struct RoutePreviewWindowView: View {
         }
 
         return .region(region)
+    }
+
+    private func routeMapPosition(for sequence: RouteStopSequence) -> MapCameraPosition {
+        guard let region = region(containing: sequence.routeCoordinates) else {
+            return .automatic
+        }
+
+        return .region(region)
+    }
+
+    private func preferredSequence(in preview: RoutePreview) -> RouteStopSequence? {
+        let destination = request.destination.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !destination.isEmpty,
+           let matchingSequence = preview.stopSequences.first(where: { sequence in
+               sequence.stops.last?.name.lowercased().contains(destination) == true
+                   || sequence.summary.lowercased().contains(destination)
+           }) {
+            return matchingSequence
+        }
+
+        return preview.primaryStopSequence
     }
 
     private func region(containing coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion? {
