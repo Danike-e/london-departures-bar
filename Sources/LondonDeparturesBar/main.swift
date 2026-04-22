@@ -124,6 +124,63 @@ struct RoutePreview {
             lhs.stops.count < rhs.stops.count
         }
     }
+
+    var directionGroups: [RouteDirectionGroup] {
+        var grouped: [String: [RouteStopSequence]] = [:]
+        var order: [String] = []
+
+        for sequence in stopSequences {
+            let key = sequence.direction.lowercased()
+            if grouped[key] == nil {
+                order.append(key)
+            }
+            grouped[key, default: []].append(sequence)
+        }
+
+        return order.compactMap { key in
+            guard let sequences = grouped[key], let first = sequences.first else { return nil }
+            return RouteDirectionGroup(direction: first.direction, sequences: sequences)
+        }
+    }
+}
+
+struct RouteDirectionGroup: Identifiable {
+    let direction: String
+    let sequences: [RouteStopSequence]
+
+    var id: String {
+        direction.lowercased()
+    }
+
+    var displayDirection: String {
+        direction.capitalized
+    }
+
+    var primarySequence: RouteStopSequence? {
+        sequences.max { lhs, rhs in
+            lhs.stops.count < rhs.stops.count
+        }
+    }
+
+    var lineStrings: [[CLLocationCoordinate2D]] {
+        sequences.flatMap(\.lineStrings)
+    }
+
+    var stops: [RouteStop] {
+        var seen = Set<String>()
+        return sequences
+            .flatMap(\.stops)
+            .filter { seen.insert($0.id).inserted }
+    }
+
+    var summary: String {
+        primarySequence?.summary ?? displayDirection
+    }
+
+    var routeCoordinates: [CLLocationCoordinate2D] {
+        let coordinates = lineStrings.flatMap { $0 }
+        return coordinates.isEmpty ? stops.map(\.coordinate) : coordinates
+    }
 }
 
 struct RouteStopSequence: Identifiable {
@@ -2335,7 +2392,7 @@ struct VehiclePlateView: View {
 struct RoutePreviewWindowView: View {
     let request: RoutePreviewRequest
     @State private var preview: RoutePreview?
-    @State private var selectedSequenceID: String?
+    @State private var selectedDirectionID: String?
     @State private var errorMessage: String?
     @State private var loading = false
     @State private var mapPosition: MapCameraPosition = .automatic
@@ -2355,8 +2412,8 @@ struct RoutePreviewWindowView: View {
             directionPicker
             mapPane
 
-            if let sequence = selectedSequence {
-                stopSequence(sequence)
+            if let group = selectedDirectionGroup {
+                stopSequence(group)
             }
         }
         .padding(18)
@@ -2387,8 +2444,8 @@ struct RoutePreviewWindowView: View {
     }
 
     private var summaryText: String {
-        if let sequence = selectedSequence {
-            return sequence.summary
+        if let group = selectedDirectionGroup {
+            return group.summary
         }
 
         let destination = request.destination.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2399,45 +2456,45 @@ struct RoutePreviewWindowView: View {
 
     @ViewBuilder
     private var directionPicker: some View {
-        if let preview, preview.stopSequences.count > 1 {
+        if let preview, preview.directionGroups.count > 1 {
             Picker("Direction", selection: Binding(
-                get: { selectedSequenceID ?? preview.primaryStopSequence?.id ?? preview.stopSequences[0].id },
+                get: { selectedDirectionID ?? preview.directionGroups[0].id },
                 set: { id in
-                    selectedSequenceID = id
-                    if let sequence = preview.stopSequences.first(where: { $0.id == id }) {
-                        mapPosition = routeMapPosition(for: sequence)
+                    selectedDirectionID = id
+                    if let group = preview.directionGroups.first(where: { $0.id == id }) {
+                        mapPosition = routeMapPosition(for: group)
                     }
                 }
             )) {
-                ForEach(preview.stopSequences) { sequence in
-                    Text(sequence.displayDirection)
-                        .tag(sequence.id)
+                ForEach(preview.directionGroups) { group in
+                    Text(group.displayDirection)
+                        .tag(group.id)
                 }
             }
             .pickerStyle(.segmented)
         }
     }
 
-    private var selectedSequence: RouteStopSequence? {
+    private var selectedDirectionGroup: RouteDirectionGroup? {
         guard let preview else { return nil }
-        if let selectedSequenceID,
-           let sequence = preview.stopSequences.first(where: { $0.id == selectedSequenceID }) {
-            return sequence
+        if let selectedDirectionID,
+           let group = preview.directionGroups.first(where: { $0.id == selectedDirectionID }) {
+            return group
         }
 
-        return preview.primaryStopSequence
+        return preview.directionGroups.first
     }
 
     private var mapPane: some View {
         Map(position: $mapPosition) {
-            if let preview, let sequence = selectedSequence {
-                let lineStrings = sequence.lineStrings.isEmpty ? [sequence.stops.map(\.coordinate)] : sequence.lineStrings
+            if let preview, let group = selectedDirectionGroup {
+                let lineStrings = group.lineStrings.isEmpty ? [group.stops.map(\.coordinate)] : group.lineStrings
                 ForEach(Array(lineStrings.enumerated()), id: \.offset) { _, coordinates in
                     MapPolyline(coordinates: coordinates)
                         .stroke(routeColor(for: preview), lineWidth: 4)
                 }
 
-                ForEach(Array(sequence.stops.enumerated()), id: \.offset) { _, stop in
+                ForEach(Array(group.stops.enumerated()), id: \.offset) { _, stop in
                     Annotation(stop.name, coordinate: stop.coordinate, anchor: .center) {
                         Circle()
                             .fill(routeColor(for: preview))
@@ -2455,7 +2512,7 @@ struct RoutePreviewWindowView: View {
         )
     }
 
-    private func stopSequence(_ sequence: RouteStopSequence) -> some View {
+    private func stopSequence(_ group: RouteDirectionGroup) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Stops")
                 .font(.caption)
@@ -2464,7 +2521,7 @@ struct RoutePreviewWindowView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(sequence.stops.enumerated()), id: \.offset) { index, stop in
+                    ForEach(Array(group.stops.enumerated()), id: \.offset) { index, stop in
                         HStack(spacing: 8) {
                             Text("\(index + 1)")
                                 .font(.caption2.bold())
@@ -2490,13 +2547,13 @@ struct RoutePreviewWindowView: View {
         do {
             let loaded = try await LondonDeparturesBarStore.fetchRoutePreview(for: request)
             preview = loaded
-            selectedSequenceID = preferredSequence(in: loaded)?.id
-            mapPosition = selectedSequenceID
-                .flatMap { id in loaded.stopSequences.first(where: { $0.id == id }) }
+            selectedDirectionID = preferredDirectionGroup(in: loaded)?.id
+            mapPosition = selectedDirectionID
+                .flatMap { id in loaded.directionGroups.first(where: { $0.id == id }) }
                 .map(routeMapPosition(for:)) ?? routeMapPosition(for: loaded)
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            selectedSequenceID = nil
+            selectedDirectionID = nil
             mapPosition = .automatic
         }
 
@@ -2518,25 +2575,27 @@ struct RoutePreviewWindowView: View {
         return .region(region)
     }
 
-    private func routeMapPosition(for sequence: RouteStopSequence) -> MapCameraPosition {
-        guard let region = region(containing: sequence.routeCoordinates) else {
+    private func routeMapPosition(for group: RouteDirectionGroup) -> MapCameraPosition {
+        guard let region = region(containing: group.routeCoordinates) else {
             return .automatic
         }
 
         return .region(region)
     }
 
-    private func preferredSequence(in preview: RoutePreview) -> RouteStopSequence? {
+    private func preferredDirectionGroup(in preview: RoutePreview) -> RouteDirectionGroup? {
         let destination = request.destination.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if !destination.isEmpty,
-           let matchingSequence = preview.stopSequences.first(where: { sequence in
-               sequence.stops.last?.name.lowercased().contains(destination) == true
-                   || sequence.summary.lowercased().contains(destination)
+           let matchingGroup = preview.directionGroups.first(where: { group in
+               group.summary.lowercased().contains(destination)
+                   || group.sequences.contains { sequence in
+                       sequence.stops.last?.name.lowercased().contains(destination) == true
+                   }
            }) {
-            return matchingSequence
+            return matchingGroup
         }
 
-        return preview.primaryStopSequence
+        return preview.directionGroups.first
     }
 
     private func region(containing coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion? {
