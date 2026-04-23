@@ -253,6 +253,9 @@ enum TransitMode: String, Codable {
             if normalizedRoute == "BL1" {
                 return Self.bakerlooBrown.color
             }
+            if let superloopColor = Self.superloopRGB(for: normalizedRoute) {
+                return superloopColor.color
+            }
             if normalizedRoute.hasPrefix("N") {
                 return Self.nightBusBlue.color
             }
@@ -286,6 +289,9 @@ enum TransitMode: String, Codable {
             let normalizedRoute = Self.normalizedRoute(route)
             if normalizedRoute == "BL1" {
                 return Self.bakerlooBrown.nsColor
+            }
+            if let superloopColor = Self.superloopRGB(for: normalizedRoute) {
+                return superloopColor.nsColor
             }
             if normalizedRoute.hasPrefix("N") {
                 return Self.nightBusBlue.nsColor
@@ -328,23 +334,22 @@ enum TransitMode: String, Codable {
 
     private static let bakerlooBrown = RGB(178, 99, 0)
     private static let nightBusBlue = RGB(195, 216, 237)
-    private static let superloopRGB = [
-        RGB(0, 174, 239),
-        RGB(255, 130, 0),
-        RGB(214, 0, 132),
-        RGB(118, 208, 0)
+    private static let superloopRouteRGB: [String: RGB] = [
+        "SL1": RGB(228, 59, 23),
+        "SL2": RGB(187, 204, 0),
+        "SL3": RGB(129, 27, 109),
+        "SL4": RGB(91, 91, 90),
+        "SL5": RGB(55, 171, 221),
+        "SL6": RGB(225, 0, 122),
+        "SL7": RGB(190, 0, 94),
+        "SL8": RGB(17, 52, 131),
+        "SL9": RGB(5, 142, 156),
+        "SL10": RGB(242, 149, 0),
+        "SL11": RGB(61, 128, 205)
     ]
 
-    static var superloopColors: [Color] {
-        superloopRGB.map(\.color)
-    }
-
-    static var superloopNSColors: [NSColor] {
-        superloopRGB.map(\.nsColor)
-    }
-
-    static func usesSuperloopColors(mode: TransitMode, route: String?) -> Bool {
-        mode == .bus && normalizedRoute(route).hasPrefix("SL")
+    private static func superloopRGB(for route: String) -> RGB? {
+        superloopRouteRGB[route]
     }
 
     static func usesNightBusColor(mode: TransitMode, route: String?) -> Bool {
@@ -1919,26 +1924,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             xRadius: 4,
             yRadius: 4
         )
-        if TransitMode.usesSuperloopColors(mode: next?.mode ?? .bus, route: next?.route) {
-            NSGraphicsContext.saveGraphicsState()
-            badgePath.addClip()
-            let stripeWidth = badgeRect.width / CGFloat(TransitMode.superloopNSColors.count)
-            for (index, color) in TransitMode.superloopNSColors.enumerated() {
-                color.setFill()
-                NSRect(
-                    x: badgeRect.minX + CGFloat(index) * stripeWidth,
-                    y: badgeRect.minY,
-                    width: index == TransitMode.superloopNSColors.count - 1
-                        ? badgeRect.maxX - (badgeRect.minX + CGFloat(index) * stripeWidth)
-                        : stripeWidth,
-                    height: badgeRect.height
-                ).fill()
-            }
-            NSGraphicsContext.restoreGraphicsState()
-        } else {
-            backgroundColor.setFill()
-            badgePath.fill()
-        }
+        backgroundColor.setFill()
+        badgePath.fill()
         label.draw(
             at: NSPoint(
                 x: badgeHorizontalPadding,
@@ -2342,16 +2329,7 @@ struct RouteColorBackground: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        if TransitMode.usesSuperloopColors(mode: mode, route: route) {
-            HStack(spacing: 0) {
-                ForEach(Array(TransitMode.superloopColors.enumerated()), id: \.offset) { _, color in
-                    color
-                }
-            }
-            .clipShape(shape)
-        } else {
-            shape.fill(mode.color(for: route))
-        }
+        shape.fill(mode.color(for: route))
     }
 }
 
