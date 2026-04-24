@@ -87,6 +87,26 @@ struct Departure: Identifiable {
     }
 }
 
+struct RouteDisruption: Identifiable, Equatable {
+    let lineID: String
+    let lineName: String
+    let mode: TransitMode
+    let status: String
+    let reason: String?
+
+    var id: String {
+        lineID
+    }
+
+    var message: String {
+        if let reason, !reason.isEmpty {
+            return "\(lineName): \(reason)"
+        }
+
+        return "\(lineName): \(status)"
+    }
+}
+
 struct RoutePreviewRequest: Identifiable, Equatable {
     let route: String
     let mode: TransitMode
@@ -527,6 +547,8 @@ final class LondonDeparturesBarStore: ObservableObject {
     @Published var liveArrivalsStopID: String?
     @Published var liveRouteSections: [TfLRouteSection] = []
     @Published var liveRouteSectionsStopID: String?
+    @Published var liveLineDisruptions: [RouteDisruption] = []
+    @Published var liveLineDisruptionsStopID: String?
     @Published var lastRefreshedAt: Date?
     @Published var now: Date = .now
     @Published var routeFiltersByStopID: [String: [String]]
@@ -879,6 +901,8 @@ final class LondonDeparturesBarStore: ObservableObject {
             liveArrivalsStopID = nil
             liveRouteSections = []
             liveRouteSectionsStopID = nil
+            liveLineDisruptions = []
+            liveLineDisruptionsStopID = nil
             lastRefreshedAt = nil
             return
         }
@@ -889,15 +913,31 @@ final class LondonDeparturesBarStore: ObservableObject {
             async let routeSectionsTask = Self.fetchLiveRouteSections(for: stopCode)
             let arrivals = await arrivalsTask
             let routeSections = await routeSectionsTask
+            let disruptions = await Self.fetchLineDisruptions(for: stop, arrivals: arrivals, routeSections: routeSections)
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self.liveArrivals = arrivals
                 self.liveArrivalsStopID = stop.id
                 self.liveRouteSections = routeSections
                 self.liveRouteSectionsStopID = stop.id
+                self.liveLineDisruptions = disruptions
+                self.liveLineDisruptionsStopID = stop.id
                 self.lastRefreshedAt = .now
             }
         }
+    }
+
+    func selectedDisruptions(for stop: Stop) -> [RouteDisruption] {
+        guard liveLineDisruptionsStopID == stop.id else {
+            return []
+        }
+
+        let selectedLineIDs = selectedStatusLineIDs(for: stop)
+        guard !selectedLineIDs.isEmpty else {
+            return []
+        }
+
+        return liveLineDisruptions.filter { selectedLineIDs.contains($0.lineID) }
     }
 
     func nextDepartures(for stop: Stop) -> [Departure] {
@@ -1109,6 +1149,97 @@ final class LondonDeparturesBarStore: ObservableObject {
         } catch {
             return []
         }
+    }
+
+    private static func fetchLineDisruptions(
+        for stop: Stop,
+        arrivals: [Departure],
+        routeSections: [TfLRouteSection]
+    ) async -> [RouteDisruption] {
+        let lineIDs = statusLineIDs(for: stop, arrivals: arrivals, routeSections: routeSections)
+        guard !lineIDs.isEmpty else {
+            return []
+        }
+
+        let chunkedIDs = stride(from: 0, to: lineIDs.count, by: 20).map { start in
+            Array(lineIDs[start..<min(start + 20, lineIDs.count)])
+        }
+        var disruptions: [RouteDisruption] = []
+
+        for ids in chunkedIDs {
+            guard let encodedIDs = ids
+                .joined(separator: ",")
+                .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+                  let url = URL(string: "https://api.tfl.gov.uk/Line/\(encodedIDs)/Status") else {
+                continue
+            }
+
+            var request = URLRequest(url: url)
+            request.setValue("LondonDeparturesBar/1.0", forHTTPHeaderField: "User-Agent")
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    continue
+                }
+
+                let decoded = try JSONDecoder().decode([TfLLineStatusResponse].self, from: data)
+                disruptions.append(contentsOf: decoded.compactMap(routeDisruption(from:)))
+            } catch {
+                continue
+            }
+        }
+
+        return disruptions.sorted { lhs, rhs in
+            lhs.lineName.localizedStandardCompare(rhs.lineName) == .orderedAscending
+        }
+    }
+
+    nonisolated private static func routeDisruption(from response: TfLLineStatusResponse) -> RouteDisruption? {
+        let disruptedStatus = response.lineStatuses
+            .filter { $0.statusSeverity != 10 }
+            .sorted { lhs, rhs in lhs.statusSeverity < rhs.statusSeverity }
+            .first
+
+        guard let disruptedStatus else {
+            return nil
+        }
+
+        let reason = firstNonEmpty(
+            disruptedStatus.reason,
+            response.disruptions?.compactMap(\.description).first
+        )
+
+        return RouteDisruption(
+            lineID: response.id.lowercased(),
+            lineName: firstNonEmpty(response.name, response.id) ?? response.id,
+            mode: mode(from: response.modeName),
+            status: disruptedStatus.statusSeverityDescription,
+            reason: reason
+        )
+    }
+
+    private static func statusLineIDs(
+        for stop: Stop,
+        arrivals: [Departure],
+        routeSections: [TfLRouteSection]
+    ) -> [String] {
+        let stopRoutes = stop.routes.map { TransitMode.lineID(for: $0, mode: stop.primaryMode) }
+        let arrivalRoutes = arrivals.map { TransitMode.lineID(for: $0.route, mode: $0.mode) }
+        let sectionRoutes = routeSections.map(\.lineId)
+        return uniqueStatusLineIDs(stopRoutes + arrivalRoutes + sectionRoutes)
+    }
+
+    private func selectedStatusLineIDs(for stop: Stop) -> Set<String> {
+        let selectedFilters = selectedFilters(for: stop.id)
+        if !selectedFilters.isEmpty {
+            let ids = selectedFilters.map { filter in
+                TransitMode.lineID(for: colorRoute(for: filter, at: stop) ?? filter, mode: mode(for: filter, at: stop))
+            }
+            return Set(Self.uniqueStatusLineIDs(ids))
+        }
+
+        return Set(Self.uniqueStatusLineIDs(stop.routes.map { TransitMode.lineID(for: $0, mode: stop.primaryMode) }))
     }
 
     static func fetchRoutePreview(for request: RoutePreviewRequest) async throws -> RoutePreview {
@@ -1388,6 +1519,17 @@ final class LondonDeparturesBarStore: ObservableObject {
         )
     }
 
+    private static func uniqueStatusLineIDs(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values
+            .map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+            }
+            .filter { !$0.isEmpty }
+            .filter { seen.insert($0).inserted }
+    }
+
     private static func closestStops(_ stops: [Stop], to coordinate: CLLocationCoordinate2D, limit: Int) -> [Stop] {
         stops
             .sorted { lhs, rhs in
@@ -1419,7 +1561,7 @@ final class LondonDeparturesBarStore: ObservableObject {
         return nil
     }
 
-    private static func firstNonEmpty(_ values: String?...) -> String? {
+    nonisolated private static func firstNonEmpty(_ values: String?...) -> String? {
         values
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
@@ -1431,7 +1573,7 @@ final class LondonDeparturesBarStore: ObservableObject {
         return modes.isEmpty ? [TransitMode.bus.rawValue] : modes
     }
 
-    private static func mode(from rawValue: String?) -> TransitMode {
+    nonisolated private static func mode(from rawValue: String?) -> TransitMode {
         guard let rawValue else { return .bus }
         return TransitMode(rawValue: rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) ?? .bus
     }
@@ -1551,6 +1693,24 @@ struct TfLRouteSection: Decodable {
     let vehicleDestinationText: String?
     let destinationName: String?
     let isActive: Bool?
+}
+
+private struct TfLLineStatusResponse: Decodable {
+    let id: String
+    let name: String?
+    let modeName: String?
+    let lineStatuses: [TfLLineStatus]
+    let disruptions: [TfLLineDisruption]?
+}
+
+private struct TfLLineStatus: Decodable {
+    let statusSeverity: Int
+    let statusSeverityDescription: String
+    let reason: String?
+}
+
+private struct TfLLineDisruption: Decodable {
+    let description: String?
 }
 
 enum RoutePreviewError: LocalizedError {
@@ -2022,6 +2182,7 @@ struct LondonDeparturesBarMenuView: View {
                     header
                         .id(Self.topScrollID)
                     actionRow
+                    DisruptionStrip(disruptions: store.selectedDisruptions(for: store.selectedStop))
                     Divider()
 
                     section(title: filterSectionTitle(for: store.selectedStop)) {
@@ -2234,6 +2395,71 @@ struct LastRefreshView: View {
 
     private func formatClock(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .shortened)
+    }
+}
+
+struct DisruptionStrip: View {
+    let disruptions: [RouteDisruption]
+    @State private var expanded = false
+
+    var body: some View {
+        if let disruption = disruptions.first {
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    expanded.toggle()
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: expanded ? 8 : 0) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption.bold())
+                            .foregroundStyle(Color(red: 0.65, green: 0.34, blue: 0.0))
+
+                        Text(disruption.message)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(expanded ? nil : 2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        if disruptions.count > 1 {
+                            Text("+\(disruptions.count - 1)")
+                                .font(.caption2.bold())
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2.bold())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if expanded && disruptions.count > 1 {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(disruptions.dropFirst()) { item in
+                                Text(item.message)
+                                    .font(.caption)
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(.leading, 22)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color(red: 1.0, green: 0.88, blue: 0.42).opacity(0.32))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Color(red: 0.73, green: 0.45, blue: 0.0).opacity(0.28), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Service disruption")
+            .accessibilityHint(expanded ? "Collapse status" : "Expand status")
+        }
     }
 }
 
@@ -2697,6 +2923,8 @@ struct LondonDeparturesBarBoardView: View {
                 section(title: filterSectionTitle(for: store.selectedStop)) {
                     RouteFilterPicker(stop: store.selectedStop)
                 }
+
+                DisruptionStrip(disruptions: store.selectedDisruptions(for: store.selectedStop))
 
                 VStack(spacing: 8) {
                     let departures = store.nextDepartures(for: store.selectedStop)

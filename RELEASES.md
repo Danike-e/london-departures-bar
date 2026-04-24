@@ -1,5 +1,11 @@
 # Releases
 
+## v1.0.4 - 2026-04-24
+
+- Added a compact TfL disruption warning strip for the selected route or line.
+- Fetches TfL line status alongside live arrivals and filters warnings to the currently selected service.
+- Bumped the app version to 1.0.4 with build number 5.
+
 ## v1.0.3 - 2026-04-21
 
 - Kept the popover anchored under the menu bar time remaining when switching stops or transport modes.
