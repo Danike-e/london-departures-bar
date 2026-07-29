@@ -468,6 +468,48 @@ private func formatDepartureBoardCountdown(until dueAt: Date, now: Date) -> Stri
     return "\(minutes)min"
 }
 
+private func spokenRouteLabel(_ route: String) -> String {
+    let trimmed = route.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.contains(where: \.isNumber) else {
+        return trimmed
+    }
+
+    var groups: [(isNumber: Bool, text: String)] = []
+    for character in trimmed.uppercased() {
+        let isNumber = character.isNumber
+        if let last = groups.indices.last, groups[last].isNumber == isNumber {
+            groups[last].text.append(character)
+        } else {
+            groups.append((isNumber, String(character)))
+        }
+    }
+
+    let digitNames: [Character: String] = [
+        "0": "oh",
+        "1": "one",
+        "2": "two",
+        "3": "three",
+        "4": "four",
+        "5": "five",
+        "6": "six",
+        "7": "seven",
+        "8": "eight",
+        "9": "nine"
+    ]
+
+    return groups.map { group in
+        if group.isNumber {
+            guard group.text.count >= 3 else {
+                return group.text
+            }
+            return group.text.compactMap { digitNames[$0] }.joined(separator: " ")
+        }
+
+        return group.text.map(String.init).joined(separator: " ")
+    }
+    .joined(separator: " ")
+}
+
 extension MKCoordinateRegion {
     func contains(_ coordinate: CLLocationCoordinate2D) -> Bool {
         let latitudeRange = (center.latitude - span.latitudeDelta / 2)...(center.latitude + span.latitudeDelta / 2)
@@ -614,6 +656,7 @@ final class LondonDeparturesBarStore: ObservableObject {
     private var arrivalsSearchTask: Task<Void, Never>?
     private var stopIndex: [String: Stop]
     private let defaultStopIDs: Set<String>
+    private var speechProcess: Process?
 
     init() {
         let defaultStop = defaultStops[0].id
@@ -692,6 +735,33 @@ final class LondonDeparturesBarStore: ObservableObject {
         nextDepartures(for: selectedStop)
     }
 
+    func speakNextDeparture() {
+        guard let departure = departures.first else { return }
+
+        let route = spokenRouteLabel(departure.route)
+        let destination = departure.destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        let seconds = departure.dueAt.timeIntervalSince(now)
+        let timing: String
+        if seconds < 60 {
+            timing = "due now"
+        } else {
+            let minutes = max(1, Int(floor(seconds / 60.0)))
+            timing = minutes == 1 ? "in one minute" : "in \(minutes) minutes"
+        }
+
+        let destinationPhrase = destination.isEmpty ? "" : " to \(destination)"
+        let announcement = "\(route)\(destinationPhrase), \(timing)."
+        if speechProcess?.isRunning == true {
+            speechProcess?.terminate()
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        process.arguments = ["-r", "160", announcement]
+        try? process.run()
+        speechProcess = process
+    }
+
     var selectedRouteFilterSummary: String {
         let filters = selectedFilters(for: selectedStopID).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         return filters.isEmpty ? "Filter: All" : "Filter: \(filters.joined(separator: ", "))"
@@ -714,11 +784,14 @@ final class LondonDeparturesBarStore: ObservableObject {
         recentIDs.compactMap { stop(for: $0) }
     }
 
-    func selectStop(_ id: String) {
+    func selectStop(_ id: String, promoteFavourite: Bool = true) {
         guard let stop = stop(for: id) else { return }
         selectedStopID = stop.id
         selectedArea = stop.area
         recentIDs = uniquePrefix([id] + recentIDs.filter { $0 != id }, limit: Self.recentLimit)
+        if promoteFavourite, favouriteIDs.contains(id) {
+            favouriteIDs = uniquePrefix([id] + favouriteIDs.filter { $0 != id }, limit: 20)
+        }
         persist()
         loadLiveTransitData(for: stop)
     }
@@ -888,7 +961,7 @@ final class LondonDeparturesBarStore: ObservableObject {
                 }
                 self.persist()
                 if let first = loaded.first {
-                    self.selectStop(first.id)
+                    self.selectStop(first.id, promoteFavourite: false)
                 }
             }
         }
@@ -2288,6 +2361,14 @@ struct LondonDeparturesBarMenuView: View {
 
     private var actionRow: some View {
         HStack(spacing: 8) {
+            Button {
+                store.speakNextDeparture()
+            } label: {
+                Label("Speak", systemImage: "speaker.wave.2")
+            }
+            .buttonStyle(.bordered)
+            .disabled(store.departures.isEmpty)
+
             Button("Open") {
                 actions.open?()
             }

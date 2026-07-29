@@ -1,5 +1,28 @@
 # Releases
 
+## v1.0.8 - 2026-07-29
+
+- Added "to" before the destination in spoken departure announcements.
+- Slowed spoken announcements to 160 words per minute.
+- Bumped the app version to 1.0.8 with build number 9.
+
+## v1.0.7 - 2026-07-29
+
+- Changed spoken departures to use the Mac's default `say` voice.
+- Bumped the app version to 1.0.7 with build number 8.
+
+## v1.0.6 - 2026-07-29
+
+- Added a Speak button that announces the next departure using the Mac's system voice.
+- Pronounced three-digit bus routes digit by digit while keeping shorter route numbers natural.
+- Bumped the app version to 1.0.6 with build number 7.
+
+## v1.0.5 - 2026-07-29
+
+- Reordered favourites by most recent stop selection, matching the Recents section.
+- Kept automatic nearby-stop updates from changing favourite order.
+- Bumped the app version to 1.0.5 with build number 6.
+
 ## v1.0.4 - 2026-04-24
 
 - Added a compact TfL disruption warning strip for the selected route or line.
