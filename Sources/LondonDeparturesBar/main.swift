@@ -233,6 +233,22 @@ struct RouteStop: Identifiable {
     let coordinate: CLLocationCoordinate2D
 }
 
+struct LiveRouteVehicle: Identifiable {
+    let id: String
+    let vehicleID: String
+    let direction: String?
+    let destination: String
+    let locationName: String
+    let coordinate: CLLocationCoordinate2D
+    let isEstimatedPosition: Bool
+    let updatedAt: Date
+
+    func matches(directionID: String?) -> Bool {
+        guard let directionID, let direction else { return true }
+        return direction.caseInsensitiveCompare(directionID) == .orderedSame
+    }
+}
+
 enum TransitMode: String, Codable {
     case bus
     case tram
@@ -1365,6 +1381,75 @@ final class LondonDeparturesBarStore: ObservableObject {
         )
     }
 
+    static func fetchLiveRouteVehicles(
+        for request: RoutePreviewRequest,
+        preview: RoutePreview
+    ) async throws -> [LiveRouteVehicle] {
+        guard request.mode == .bus else { return [] }
+        guard let encodedLineID = request.lineID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "https://api.tfl.gov.uk/Line/\(encodedLineID)/Arrivals") else {
+            throw RoutePreviewError.invalidRoute
+        }
+
+        var urlRequest = URLRequest(url: url)
+        urlRequest.setValue("LondonDeparturesBar/1.0", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw RoutePreviewError.liveVehiclesUnavailable
+        }
+
+        let predictions = try JSONDecoder().decode([TfLRouteVehiclePrediction].self, from: data)
+        let stops = preview.stopSequences.flatMap(\.stops)
+        let stopsByID = Dictionary(stops.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
+        var predictionsByVehicle: [String: [TfLRouteVehiclePrediction]] = [:]
+
+        for prediction in predictions {
+            let vehicleID = prediction.vehicleId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !vehicleID.isEmpty else { continue }
+            predictionsByVehicle[vehicleID, default: []].append(prediction)
+        }
+
+        return predictionsByVehicle.compactMap { vehicleID, vehiclePredictions in
+            let sorted = vehiclePredictions.sorted { $0.timeToStation < $1.timeToStation }
+            guard let prediction = sorted.first else { return nil }
+            let reportedLocation = prediction.currentLocation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let reportedStop = reportedLocation.isEmpty
+                ? nil
+                : stops.first { stopName($0.name, matchesReportedLocation: reportedLocation) }
+            let predictedStop = prediction.naptanId
+                .flatMap { stopsByID[$0.lowercased()] }
+
+            guard let positionStop = reportedStop ?? predictedStop else { return nil }
+            return LiveRouteVehicle(
+                id: vehicleID,
+                vehicleID: vehicleID,
+                direction: prediction.direction,
+                destination: prediction.destinationName,
+                locationName: reportedLocation.isEmpty ? positionStop.name : reportedLocation,
+                coordinate: positionStop.coordinate,
+                isEstimatedPosition: reportedStop == nil,
+                updatedAt: prediction.timestampDate ?? .now
+            )
+        }
+        .sorted { $0.vehicleID.localizedStandardCompare($1.vehicleID) == .orderedAscending }
+    }
+
+    nonisolated private static func stopName(_ stopName: String, matchesReportedLocation location: String) -> Bool {
+        func normalized(_ value: String) -> String {
+            value
+                .lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        }
+
+        let normalizedStop = normalized(stopName)
+        let normalizedLocation = normalized(location)
+        return !normalizedStop.isEmpty
+            && (normalizedLocation.contains(normalizedStop) || normalizedStop.contains(normalizedLocation))
+    }
+
     nonisolated private static func coordinates(fromLineString value: String) -> [[CLLocationCoordinate2D]] {
         guard let data = value.data(using: .utf8),
               let parsed = try? JSONSerialization.jsonObject(with: data) as? [Any] else {
@@ -1789,6 +1874,7 @@ private struct TfLLineDisruption: Decodable {
 enum RoutePreviewError: LocalizedError {
     case invalidRoute
     case routeUnavailable
+    case liveVehiclesUnavailable
     case unsupportedMode
 
     var errorDescription: String? {
@@ -1797,6 +1883,8 @@ enum RoutePreviewError: LocalizedError {
             return "This route could not be opened."
         case .routeUnavailable:
             return "TfL did not return a route map for this service."
+        case .liveVehiclesUnavailable:
+            return "TfL live vehicle positions are temporarily unavailable."
         case .unsupportedMode:
             return "Route maps are available for TfL services only."
         }
@@ -1822,6 +1910,21 @@ private struct TfLMatchedStop: Decodable {
     let name: String
     let lat: Double?
     let lon: Double?
+}
+
+private struct TfLRouteVehiclePrediction: Decodable {
+    let vehicleId: String
+    let naptanId: String?
+    let destinationName: String
+    let direction: String?
+    let currentLocation: String?
+    let timestamp: String?
+    let timeToStation: Int
+
+    var timestampDate: Date? {
+        guard let timestamp else { return nil }
+        return ISO8601DateFormatter().date(from: timestamp)
+    }
 }
 
 private struct TfLNearbyStopsResponse: Decodable {
@@ -2677,9 +2780,13 @@ struct VehiclePlateView: View {
 struct RoutePreviewWindowView: View {
     let request: RoutePreviewRequest
     @State private var preview: RoutePreview?
+    @State private var liveVehicles: [LiveRouteVehicle] = []
     @State private var selectedDirectionID: String?
     @State private var errorMessage: String?
+    @State private var vehicleErrorMessage: String?
     @State private var loading = false
+    @State private var loadingVehicles = false
+    @State private var vehiclesRefreshedAt: Date?
     @State private var mapPosition: MapCameraPosition = .automatic
 
     var body: some View {
@@ -2695,6 +2802,9 @@ struct RoutePreviewWindowView: View {
             }
 
             directionPicker
+            if request.mode == .bus {
+                vehicleStatus
+            }
             mapPane
 
             if let group = selectedDirectionGroup {
@@ -2705,6 +2815,13 @@ struct RoutePreviewWindowView: View {
         .frame(minWidth: 540, minHeight: 620)
         .task(id: request.id) {
             await loadRoutePreview()
+        }
+        .task(id: preview?.lineID) {
+            guard preview != nil else { return }
+            while !Task.isCancelled {
+                await loadLiveVehicles()
+                try? await Task.sleep(for: .seconds(30))
+            }
         }
     }
 
@@ -2770,6 +2887,88 @@ struct RoutePreviewWindowView: View {
         return preview.directionGroups.first
     }
 
+    private var inboundVehicles: [LiveRouteVehicle] {
+        liveVehicles.filter { $0.direction?.lowercased() == "inbound" }
+    }
+
+    private var outboundVehicles: [LiveRouteVehicle] {
+        liveVehicles.filter { $0.direction?.lowercased() == "outbound" }
+    }
+
+    private var unknownDirectionVehicles: [LiveRouteVehicle] {
+        liveVehicles.filter {
+            guard let direction = $0.direction?.lowercased() else { return true }
+            return direction != "inbound" && direction != "outbound"
+        }
+    }
+
+    private var vehicleStatus: some View {
+        HStack(spacing: 8) {
+            directionCount(
+                title: "Inbound",
+                count: inboundVehicles.count,
+                systemImage: "arrow.down",
+                color: preview.map(routeColor(for:)) ?? .accentColor
+            )
+            directionCount(
+                title: "Outbound",
+                count: outboundVehicles.count,
+                systemImage: "arrow.up",
+                color: .primary
+            )
+
+            if !unknownDirectionVehicles.isEmpty {
+                Text("\(unknownDirectionVehicles.count) direction unknown")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let vehiclesRefreshedAt {
+                Text("Updated \(vehiclesRefreshedAt, style: .relative)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if loadingVehicles {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            if let vehicleErrorMessage {
+                Text(vehicleErrorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                Task { await loadLiveVehicles() }
+            } label: {
+                Label("Refresh buses", systemImage: "arrow.clockwise")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.borderless)
+            .help("Refresh live buses")
+            .disabled(loadingVehicles)
+        }
+    }
+
+    private func directionCount(
+        title: String,
+        count: Int,
+        systemImage: String,
+        color: Color
+    ) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+                .font(.caption.bold())
+            Text("\(title) \(count)")
+                .font(.subheadline.bold())
+        }
+        .foregroundStyle(color)
+        .accessibilityLabel("\(count) \(title.lowercased()) buses")
+    }
+
     private var mapPane: some View {
         Map(position: $mapPosition) {
             if let preview, let group = selectedDirectionGroup {
@@ -2785,6 +2984,46 @@ struct RoutePreviewWindowView: View {
                             .fill(routeColor(for: preview))
                             .frame(width: 7, height: 7)
                             .overlay(Circle().stroke(.white, lineWidth: 1.5))
+                    }
+                }
+
+                ForEach(liveVehicles) { vehicle in
+                    Annotation(
+                        "\(vehicle.vehicleID) to \(vehicle.destination)",
+                        coordinate: vehicle.coordinate,
+                        anchor: .bottom
+                    ) {
+                        VStack(spacing: 3) {
+                            HStack(spacing: 3) {
+                                Image(systemName: vehicleDirectionIcon(for: vehicle))
+                                Text(vehicleDirectionLabel(for: vehicle))
+                            }
+                                .font(.system(size: 10, weight: .heavy))
+                                .foregroundStyle(.white)
+                                .frame(width: 38, height: 24)
+                                .background(
+                                    vehicleMarkerColor(for: vehicle, preview: preview),
+                                    in: RoundedRectangle(cornerRadius: 5)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .stroke(.white, lineWidth: 2)
+                                )
+                                .shadow(radius: 2, y: 1)
+                            Text(vehicle.vehicleID.uppercased())
+                                .font(.system(size: 9, weight: .bold, design: .rounded))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 3))
+                        }
+                        .help(
+                            "\(vehicle.vehicleID.uppercased()) to \(vehicle.destination)\n"
+                                + "\(vehicle.locationName)\(vehicle.isEstimatedPosition ? " (next predicted stop)" : "")"
+                        )
+                        .accessibilityLabel(
+                            "\(vehicle.direction?.capitalized ?? "Unknown direction") bus "
+                                + "\(vehicle.vehicleID), towards \(vehicle.destination), \(vehicle.locationName)"
+                        )
                     }
                 }
             }
@@ -2845,8 +3084,54 @@ struct RoutePreviewWindowView: View {
         loading = false
     }
 
+    private func loadLiveVehicles() async {
+        guard let preview, request.mode == .bus, !loadingVehicles else { return }
+        loadingVehicles = true
+
+        do {
+            liveVehicles = try await LondonDeparturesBarStore.fetchLiveRouteVehicles(
+                for: request,
+                preview: preview
+            )
+            vehiclesRefreshedAt = .now
+            vehicleErrorMessage = nil
+        } catch {
+            vehicleErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+
+        loadingVehicles = false
+    }
+
     private func routeColor(for preview: RoutePreview) -> Color {
         preview.mode.color(for: request.colorRoute ?? preview.lineName)
+    }
+
+    private func vehicleDirectionLabel(for vehicle: LiveRouteVehicle) -> String {
+        switch vehicle.direction?.lowercased() {
+        case "inbound":
+            return "IN"
+        case "outbound":
+            return "OUT"
+        default:
+            return "?"
+        }
+    }
+
+    private func vehicleDirectionIcon(for vehicle: LiveRouteVehicle) -> String {
+        switch vehicle.direction?.lowercased() {
+        case "inbound":
+            return "arrow.down"
+        case "outbound":
+            return "arrow.up"
+        default:
+            return "questionmark"
+        }
+    }
+
+    private func vehicleMarkerColor(for vehicle: LiveRouteVehicle, preview: RoutePreview) -> Color {
+        vehicle.direction?.lowercased() == "inbound"
+            ? routeColor(for: preview)
+            : Color(nsColor: .labelColor)
     }
 
     private func routeMapPosition(for preview: RoutePreview) -> MapCameraPosition {

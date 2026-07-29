@@ -1,5 +1,19 @@
 # Releases
 
+## v1.0.10 - 2026-07-29
+
+- Showed inbound and outbound buses together on route maps.
+- Added distinct `IN` and `OUT` bus markers with directional arrows.
+- Added separate live inbound and outbound vehicle counts above the map.
+- Bumped the app version to 1.0.10 with build number 11.
+
+## v1.0.9 - 2026-07-29
+
+- Added live bus markers to route maps, with one marker per TfL-reported vehicle.
+- Filtered live vehicle markers and counts by inbound or outbound direction.
+- Added automatic 30-second vehicle refreshes and a manual refresh button.
+- Bumped the app version to 1.0.9 with build number 10.
+
 ## v1.0.8 - 2026-07-29
 
 - Added "to" before the destination in spoken departure announcements.
