@@ -8,7 +8,7 @@ London Departures Bar is a lightweight macOS menu bar app for live public transp
 
 - Shows the next live departure directly in the macOS menu bar.
 - Uses transport-coloured badges for buses, trams, Tube lines, DLR, Overground, Elizabeth line, and National Rail.
-- Opens a compact popover with the selected stop, live departures, refresh state, favourites, and recent stops.
+- Opens a two-column popover with the selected stop and live departures on the left, and a scrollable list of favourites and recent stops on the right.
 - Filters departures by route, destination, or National Rail platform.
 - Displays bus vehicle IDs as plate-style labels when TfL provides them.
 - Saves selected stops, favourites, recent stops, cached nearby stops, and active filters between launches.
@@ -99,7 +99,7 @@ The generated release DMG is ad-hoc signed. macOS may warn that the app is from 
 
 ## Usage
 
-Launch `London Departures Bar.app`, then click the menu bar item to open the departures popover. Use favourites and recents to switch stops quickly, or open the map window to find nearby stops and stations.
+Launch `London Departures Bar.app`, then click the menu bar item to open the departures popover. Select a favourite or recent stop in the right column to update the stop, routes, and departures on the left. Each column scrolls independently, and selecting a favourite keeps the list in its existing order. Open the map window to find nearby stops and stations.
 
 Click a route, destination, or platform badge to filter the departure list. Click the badge again to remove that filter, or use `All` to show every available departure for the selected stop.
 

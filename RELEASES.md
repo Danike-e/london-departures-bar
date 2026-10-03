@@ -1,5 +1,12 @@
 # Releases
 
+## v1.0.11 - 2026-07-29
+
+- Estimated each live bus's progress between its previous and next predicted stops.
+- Moved bus markers every second along the route line between TfL refreshes.
+- Corrected estimated positions against fresh TfL predictions every 30 seconds.
+- Bumped the app version to 1.0.11 with build number 12.
+
 ## v1.0.10 - 2026-07-29
 
 - Showed inbound and outbound buses together on route maps.

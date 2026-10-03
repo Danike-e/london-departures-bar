@@ -239,13 +239,44 @@ struct LiveRouteVehicle: Identifiable {
     let direction: String?
     let destination: String
     let locationName: String
-    let coordinate: CLLocationCoordinate2D
+    let positionPath: [CLLocationCoordinate2D]
+    let initialProgress: Double
+    let segmentDuration: TimeInterval
     let isEstimatedPosition: Bool
     let updatedAt: Date
 
-    func matches(directionID: String?) -> Bool {
-        guard let directionID, let direction else { return true }
-        return direction.caseInsensitiveCompare(directionID) == .orderedSame
+    func coordinate(at date: Date) -> CLLocationCoordinate2D {
+        guard let first = positionPath.first else {
+            return CLLocationCoordinate2D()
+        }
+        guard positionPath.count > 1, segmentDuration > 0 else { return first }
+
+        let elapsed = max(0, date.timeIntervalSince(updatedAt))
+        let progress = min(1, initialProgress + elapsed / segmentDuration)
+        let points = positionPath.map(MKMapPoint.init)
+        let lengths = zip(points, points.dropFirst()).map { $0.distance(to: $1) }
+        let totalLength = lengths.reduce(0, +)
+        guard totalLength > 0 else { return first }
+
+        let targetDistance = totalLength * progress
+        var travelled = 0.0
+        for index in lengths.indices {
+            let segmentLength = lengths[index]
+            if travelled + segmentLength >= targetDistance {
+                let segmentProgress = segmentLength > 0
+                    ? (targetDistance - travelled) / segmentLength
+                    : 0
+                let start = points[index]
+                let end = points[index + 1]
+                return MKMapPoint(
+                    x: start.x + (end.x - start.x) * segmentProgress,
+                    y: start.y + (end.y - start.y) * segmentProgress
+                ).coordinate
+            }
+            travelled += segmentLength
+        }
+
+        return positionPath.last ?? first
     }
 }
 
@@ -1410,7 +1441,7 @@ final class LondonDeparturesBarStore: ObservableObject {
             predictionsByVehicle[vehicleID, default: []].append(prediction)
         }
 
-        return predictionsByVehicle.compactMap { vehicleID, vehiclePredictions in
+        return predictionsByVehicle.compactMap { vehicleID, vehiclePredictions -> LiveRouteVehicle? in
             let sorted = vehiclePredictions.sorted { $0.timeToStation < $1.timeToStation }
             guard let prediction = sorted.first else { return nil }
             let reportedLocation = prediction.currentLocation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1421,18 +1452,100 @@ final class LondonDeparturesBarStore: ObservableObject {
                 .flatMap { stopsByID[$0.lowercased()] }
 
             guard let positionStop = reportedStop ?? predictedStop else { return nil }
+            let sequence = routeSequence(
+                containing: positionStop.id,
+                direction: prediction.direction,
+                in: preview
+            )
+            let stopIndex = sequence?.stops.firstIndex {
+                $0.id.caseInsensitiveCompare(positionStop.id) == .orderedSame
+            }
+            let previousStop: RouteStop? = stopIndex.flatMap { index in
+                guard index > 0 else { return nil }
+                return sequence?.stops[index - 1]
+            }
+            let nextPrediction = sorted.first {
+                $0.naptanId?.caseInsensitiveCompare(prediction.naptanId ?? "") != .orderedSame
+                    && $0.timeToStation > prediction.timeToStation
+            }
+            let inferredDuration = TimeInterval(max(
+                45,
+                (nextPrediction?.timeToStation ?? prediction.timeToStation + 90)
+                    - prediction.timeToStation
+            ))
+            let progress = reportedStop == nil && previousStop != nil
+                ? min(1, max(0, 1 - Double(max(0, prediction.timeToStation)) / inferredDuration))
+                : 1
+            let positionPath = previousStop.map {
+                routePath(
+                    from: $0.coordinate,
+                    to: positionStop.coordinate,
+                    sequence: sequence
+                )
+            } ?? [positionStop.coordinate]
+            let locationName = previousStop.map {
+                "Between \($0.name) and \(positionStop.name)"
+            } ?? (reportedLocation.isEmpty ? positionStop.name : reportedLocation)
+
             return LiveRouteVehicle(
                 id: vehicleID,
                 vehicleID: vehicleID,
                 direction: prediction.direction,
                 destination: prediction.destinationName,
-                locationName: reportedLocation.isEmpty ? positionStop.name : reportedLocation,
-                coordinate: positionStop.coordinate,
-                isEstimatedPosition: reportedStop == nil,
-                updatedAt: prediction.timestampDate ?? .now
+                locationName: locationName,
+                positionPath: positionPath,
+                initialProgress: progress,
+                segmentDuration: inferredDuration,
+                isEstimatedPosition: reportedStop == nil && previousStop != nil,
+                updatedAt: .now
             )
         }
         .sorted { $0.vehicleID.localizedStandardCompare($1.vehicleID) == .orderedAscending }
+    }
+
+    nonisolated private static func routeSequence(
+        containing stopID: String,
+        direction: String?,
+        in preview: RoutePreview
+    ) -> RouteStopSequence? {
+        let matchingDirection = preview.stopSequences.filter {
+            guard let direction else { return true }
+            return $0.direction.caseInsensitiveCompare(direction) == .orderedSame
+        }
+        return (matchingDirection + preview.stopSequences).first { sequence in
+            sequence.stops.contains {
+                $0.id.caseInsensitiveCompare(stopID) == .orderedSame
+            }
+        }
+    }
+
+    nonisolated private static func routePath(
+        from start: CLLocationCoordinate2D,
+        to end: CLLocationCoordinate2D,
+        sequence: RouteStopSequence?
+    ) -> [CLLocationCoordinate2D] {
+        guard let coordinates = sequence?.lineStrings.first, coordinates.count > 1 else {
+            return [start, end]
+        }
+
+        let points = coordinates.map(MKMapPoint.init)
+        let startPoint = MKMapPoint(start)
+        let endPoint = MKMapPoint(end)
+        guard let startIndex = points.indices.min(by: {
+            points[$0].distance(to: startPoint) < points[$1].distance(to: startPoint)
+        }), let endIndex = points.indices.min(by: {
+            points[$0].distance(to: endPoint) < points[$1].distance(to: endPoint)
+        }) else {
+            return [start, end]
+        }
+
+        let routeSlice: [CLLocationCoordinate2D]
+        if startIndex <= endIndex {
+            routeSlice = Array(coordinates[startIndex...endIndex])
+        } else {
+            routeSlice = Array(coordinates[endIndex...startIndex].reversed())
+        }
+        return [start] + routeSlice + [end]
     }
 
     nonisolated private static func stopName(_ stopName: String, matchesReportedLocation location: String) -> Bool {
@@ -1969,6 +2082,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let actions = AppActions()
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private var popoverStatusItemLength: CGFloat?
     private var standaloneWindow: NSWindow?
     private var routePreviewWindow: NSWindow?
     private var cancellable: AnyCancellable?
@@ -1994,7 +2108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let popover = NSPopover()
         popover.behavior = .semitransient
         popover.delegate = self
-        popover.contentSize = NSSize(width: 400, height: 440)
+        popover.contentSize = LondonDeparturesBarMenuView.popoverSize
         popover.contentViewController = NSHostingController(
             rootView: LondonDeparturesBarMenuView()
                 .environmentObject(store)
@@ -2035,6 +2149,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return
         }
         updateStatusItem()
+        // Changing the status button's width moves any popover anchored to it.
+        // Keep its geometry fixed until the user closes the popover.
+        popoverStatusItemLength = button.bounds.width
+        statusItem?.length = button.bounds.width
         popover.show(relativeTo: statusCountdownAnchorRect(in: button), of: button, preferredEdge: .minY)
         clearStatusButtonHighlight()
         NSApp.activate(ignoringOtherApps: true)
@@ -2063,6 +2181,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
+        popoverStatusItemLength = nil
+        updateStatusItem()
         clearStatusButtonHighlight()
     }
 
@@ -2151,7 +2271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         let buttonFrame = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
-        let popoverWidth = popover?.contentSize.width ?? 400
+        let popoverWidth = popover?.contentSize.width ?? LondonDeparturesBarMenuView.popoverSize.width
         let popoverLeftEdge = buttonFrame.midX - popoverWidth / 2
         let preferredX = popoverLeftEdge - frame.width - 18
         return min(max(preferredX, minimumX), maximumX)
@@ -2182,6 +2302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             log("status item update skipped: missing button")
             return
         }
+        statusItem.length = popoverStatusItemLength ?? NSStatusItem.variableLength
         let image = statusImage()
         button.image = image
         button.imagePosition = .imageOnly
@@ -2189,12 +2310,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         button.title = ""
         button.imageScaling = .scaleProportionallyDown
         clearStatusButtonHighlight()
-        statusItem.length = NSStatusItem.variableLength
         button.toolTip = store.statusTooltip
         log("status item updated width=\(image?.size.width ?? 0) departures=\(store.departures.count) label=\(statusServiceLabel())")
-        if popover?.isShown == true {
-            popover?.positioningRect = statusCountdownAnchorRect(in: button)
-        }
     }
 
     private func clearStatusButtonHighlight() {
@@ -2348,18 +2465,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 struct LondonDeparturesBarMenuView: View {
     @EnvironmentObject private var store: LondonDeparturesBarStore
     @EnvironmentObject private var actions: AppActions
-    private let contentWidth: CGFloat = 352
+    static let popoverSize = NSSize(width: 720, height: 500)
     private static let topScrollID = "menu-top"
 
     var body: some View {
+        HStack(spacing: 0) {
+            departuresPane
+                .frame(width: 400)
+
+            Divider()
+
+            stopsPane
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(Color.primary.opacity(0.025))
+        }
+        .frame(width: Self.popoverSize.width, height: Self.popoverSize.height)
+    }
+
+    private var departuresPane: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            Divider()
+
+            departureDetails
+                .frame(maxHeight: .infinity)
+
+            Divider()
+            actionRow
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var departureDetails: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    header
+                    Color.clear
+                        .frame(height: 0)
                         .id(Self.topScrollID)
-                    actionRow
                     DisruptionStrip(disruptions: store.selectedDisruptions(for: store.selectedStop))
-                    Divider()
 
                     section(title: filterSectionTitle(for: store.selectedStop)) {
                         RouteFilterPicker(stop: store.selectedStop)
@@ -2418,20 +2564,37 @@ struct LondonDeparturesBarMenuView: View {
                         }
                     }
 
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .onChange(of: store.selectedStopID) {
+                proxy.scrollTo(Self.topScrollID, anchor: .top)
+            }
+        }
+    }
+
+    private var stopsPane: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Stops")
+                .font(.headline)
+                .padding(.horizontal, 16)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
                     section(title: "Favourites") {
-                        stopList(store.favouriteStops, emptyText: "Add a stop to pin it here.", scrollProxy: proxy)
+                        stopList(store.favouriteStops, emptyText: "Add a stop to pin it here.")
                     }
 
                     section(title: "Recent") {
-                        stopList(store.recentStops, emptyText: "Picked stops show up here.", scrollProxy: proxy)
+                        stopList(store.recentStops, emptyText: "Picked stops show up here.")
                     }
                 }
-                .frame(width: contentWidth, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(width: 400, height: 440)
         }
+        .padding(.top, 16)
     }
 
     private var header: some View {
@@ -2496,7 +2659,7 @@ struct LondonDeparturesBarMenuView: View {
         }
     }
 
-    private func stopList(_ stops: [Stop], emptyText: String, scrollProxy: ScrollViewProxy) -> some View {
+    private func stopList(_ stops: [Stop], emptyText: String) -> some View {
         VStack(spacing: 8) {
             if stops.isEmpty {
                 Text(emptyText)
@@ -2505,20 +2668,22 @@ struct LondonDeparturesBarMenuView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 ForEach(stops) { stop in
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    HStack(alignment: .center, spacing: 10) {
                         Button {
-                            store.selectStop(stop.id)
-                            scrollToTop(using: scrollProxy)
+                            store.selectStop(stop.id, promoteFavourite: false)
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(stop.name)
+                                    .font(.callout.weight(store.selectedStopID == stop.id ? .semibold : .regular))
                                     .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
                                 StopMetaView(stop: stop)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityAddTraits(store.selectedStopID == stop.id ? [.isSelected] : [])
 
                         Button {
                             store.toggleFavourite(stop.id)
@@ -2527,16 +2692,16 @@ struct LondonDeparturesBarMenuView: View {
                                 .foregroundStyle(store.favouriteIDs.contains(stop.id) ? .yellow : .secondary)
                         }
                         .buttonStyle(.borderless)
+                        .help(store.favouriteIDs.contains(stop.id) ? "Remove from favourites" : "Add to favourites")
+                        .accessibilityLabel("\(store.favouriteIDs.contains(stop.id) ? "Remove from favourites" : "Add to favourites"): \(stop.name)")
                     }
-                    .padding(.vertical, 4)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(store.selectedStopID == stop.id ? Color.accentColor.opacity(0.12) : Color.clear)
+                    )
                 }
             }
-        }
-    }
-
-    private func scrollToTop(using proxy: ScrollViewProxy) {
-        withAnimation(.easeOut(duration: 0.18)) {
-            proxy.scrollTo(Self.topScrollID, anchor: .top)
         }
     }
 
@@ -2970,34 +3135,35 @@ struct RoutePreviewWindowView: View {
     }
 
     private var mapPane: some View {
-        Map(position: $mapPosition) {
-            if let preview, let group = selectedDirectionGroup {
-                let lineStrings = group.lineStrings.isEmpty ? [group.stops.map(\.coordinate)] : group.lineStrings
-                ForEach(Array(lineStrings.enumerated()), id: \.offset) { _, coordinates in
-                    MapPolyline(coordinates: coordinates)
-                        .stroke(routeColor(for: preview), lineWidth: 4)
-                }
-
-                ForEach(Array(group.stops.enumerated()), id: \.offset) { _, stop in
-                    Annotation(stop.name, coordinate: stop.coordinate, anchor: .center) {
-                        Circle()
-                            .fill(routeColor(for: preview))
-                            .frame(width: 7, height: 7)
-                            .overlay(Circle().stroke(.white, lineWidth: 1.5))
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            Map(position: $mapPosition) {
+                if let preview, let group = selectedDirectionGroup {
+                    let lineStrings = group.lineStrings.isEmpty ? [group.stops.map(\.coordinate)] : group.lineStrings
+                    ForEach(Array(lineStrings.enumerated()), id: \.offset) { _, coordinates in
+                        MapPolyline(coordinates: coordinates)
+                            .stroke(routeColor(for: preview), lineWidth: 4)
                     }
-                }
 
-                ForEach(liveVehicles) { vehicle in
-                    Annotation(
-                        "\(vehicle.vehicleID) to \(vehicle.destination)",
-                        coordinate: vehicle.coordinate,
-                        anchor: .bottom
-                    ) {
-                        VStack(spacing: 3) {
-                            HStack(spacing: 3) {
-                                Image(systemName: vehicleDirectionIcon(for: vehicle))
-                                Text(vehicleDirectionLabel(for: vehicle))
-                            }
+                    ForEach(Array(group.stops.enumerated()), id: \.offset) { _, stop in
+                        Annotation(stop.name, coordinate: stop.coordinate, anchor: .center) {
+                            Circle()
+                                .fill(routeColor(for: preview))
+                                .frame(width: 7, height: 7)
+                                .overlay(Circle().stroke(.white, lineWidth: 1.5))
+                        }
+                    }
+
+                    ForEach(liveVehicles) { vehicle in
+                        Annotation(
+                            "\(vehicle.vehicleID) to \(vehicle.destination)",
+                            coordinate: vehicle.coordinate(at: timeline.date),
+                            anchor: .bottom
+                        ) {
+                            VStack(spacing: 3) {
+                                HStack(spacing: 3) {
+                                    Image(systemName: vehicleDirectionIcon(for: vehicle))
+                                    Text(vehicleDirectionLabel(for: vehicle))
+                                }
                                 .font(.system(size: 10, weight: .heavy))
                                 .foregroundStyle(.white)
                                 .frame(width: 38, height: 24)
@@ -3010,20 +3176,21 @@ struct RoutePreviewWindowView: View {
                                         .stroke(.white, lineWidth: 2)
                                 )
                                 .shadow(radius: 2, y: 1)
-                            Text(vehicle.vehicleID.uppercased())
-                                .font(.system(size: 9, weight: .bold, design: .rounded))
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 2)
-                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 3))
+                                Text(vehicle.vehicleID.uppercased())
+                                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 3))
+                            }
+                            .help(
+                                "\(vehicle.vehicleID.uppercased()) to \(vehicle.destination)\n"
+                                    + "\(vehicle.locationName)\(vehicle.isEstimatedPosition ? " (estimated live position)" : "")"
+                            )
+                            .accessibilityLabel(
+                                "\(vehicle.direction?.capitalized ?? "Unknown direction") bus "
+                                    + "\(vehicle.vehicleID), towards \(vehicle.destination), \(vehicle.locationName)"
+                            )
                         }
-                        .help(
-                            "\(vehicle.vehicleID.uppercased()) to \(vehicle.destination)\n"
-                                + "\(vehicle.locationName)\(vehicle.isEstimatedPosition ? " (next predicted stop)" : "")"
-                        )
-                        .accessibilityLabel(
-                            "\(vehicle.direction?.capitalized ?? "Unknown direction") bus "
-                                + "\(vehicle.vehicleID), towards \(vehicle.destination), \(vehicle.locationName)"
-                        )
                     }
                 }
             }
