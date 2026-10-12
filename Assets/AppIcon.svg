@@ -1,17 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="London Departures Bar app icon">
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">London Departures Bar</title>
+  <desc id="description">A red transport ring with an ivory departure arrow and amber clock hand on a dark rounded square.</desc>
   <defs>
-    <linearGradient id="plate" x1="160" y1="120" x2="864" y2="904" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#f7f9ff"/>
-      <stop offset="1" stop-color="#dbe3f3"/>
+    <linearGradient id="tile" x1="180" y1="96" x2="820" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#253343"/>
+      <stop offset="0.55" stop-color="#14212f"/>
+      <stop offset="1" stop-color="#0d1723"/>
+    </linearGradient>
+    <linearGradient id="route" x1="330" y1="270" x2="690" y2="750" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff6358"/>
+      <stop offset="1" stop-color="#e63135"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="256" y1="470" x2="790" y2="570" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e8edf0"/>
     </linearGradient>
   </defs>
-  <rect width="1024" height="1024" rx="224" fill="url(#plate)"/>
-  <circle cx="512" cy="512" r="292" fill="none" stroke="#dc241f" stroke-width="150"/>
-  <rect x="142" y="405" width="740" height="214" rx="58" fill="#0019a8"/>
-  <rect x="242" y="456" width="540" height="112" rx="24" fill="#ffffff"/>
-  <text x="512" y="537" text-anchor="middle" font-family="Avenir Next, Helvetica, Arial, sans-serif" font-size="92" font-weight="800" letter-spacing="5" fill="#0019a8">BUS</text>
-  <path d="M318 662h388c41 0 76 29 84 69l21 107H213l21-107c8-40 43-69 84-69z" fill="#dc241f"/>
-  <rect x="307" y="704" width="410" height="74" rx="18" fill="#ffffff"/>
-  <circle cx="348" cy="838" r="42" fill="#0019a8"/>
-  <circle cx="676" cy="838" r="42" fill="#0019a8"/>
+  <rect x="96" y="108" width="832" height="832" rx="190" fill="#0a111b" opacity="0.16"/>
+  <rect x="96" y="96" width="832" height="832" rx="190" fill="url(#tile)"/>
+  <rect x="97.5" y="97.5" width="829" height="829" rx="188.5" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="3"/>
+  <circle cx="512" cy="524" r="218" fill="none" stroke="#050d17" stroke-opacity="0.28" stroke-width="88"/>
+  <circle cx="512" cy="512" r="218" fill="none" stroke="url(#route)" stroke-width="88"/>
+  <path d="M512 350V512" fill="none" stroke="#ffbd4a" stroke-width="52" stroke-linecap="round"/>
+  <path d="M266 486H662V436Q662 427 670 433L782 518Q790 524 782 530L670 615Q662 621 662 612V562H266Q232 562 232 528V520Q232 486 266 486Z" fill="#050d17" opacity="0.22"/>
+  <path d="M266 474H662V424Q662 415 670 421L782 506Q790 512 782 518L670 603Q662 609 662 600V550H266Q232 550 232 516V508Q232 474 266 474Z" fill="url(#arrow)"/>
 </svg>

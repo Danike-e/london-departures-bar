@@ -29,6 +29,6 @@
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
   <key>NSLocationWhenInUseUsageDescription</key>
-  <string>London Departures Bar uses your location to move the map to nearby stops.</string>
+  <string>London Departures Bar uses your location to show the closest stops and stations in the Nearby tab and on the map.</string>
 </dict>
 </plist>
